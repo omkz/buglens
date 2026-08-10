@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+
+node_modules/
+.next/
+
+__pycache__/
+*.py[cod]
+.venv/
+
+.DS_Store
