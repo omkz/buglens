@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     github_client_secret: str = ""
 
     frontend_base_url: str = "http://localhost:3000"
+    backend_base_url: str = "http://localhost:8000"
+    github_callback_url: str = "http://localhost:8000/github/oauth/callback"
 
 
 @lru_cache

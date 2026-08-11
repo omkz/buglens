@@ -5,24 +5,39 @@ import { API_BASE_URL } from "@/lib/config";
 
 export type GithubStatus = "loading" | "connected" | "disconnected";
 
-export function GithubConnection({ status }: { status: GithubStatus }) {
+export type GithubConnectionInfo = {
+  status: GithubStatus;
+  accountLogin: string | null;
+};
+
+export function GithubConnection({ info }: { info: GithubConnectionInfo }) {
   const [isRedirecting, setIsRedirecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleConnect = useCallback(async () => {
+    setError(null);
     setIsRedirecting(true);
     try {
       const response = await fetch(`${API_BASE_URL}/github/install-url`);
       if (!response.ok) {
-        throw new Error("Failed to start GitHub connection");
+        const body = (await response.json().catch(() => null)) as {
+          detail?: string;
+        } | null;
+        throw new Error(body?.detail ?? "Failed to start GitHub connection.");
       }
       const data = (await response.json()) as { url: string };
       window.location.href = data.url;
-    } catch {
+    } catch (err) {
       setIsRedirecting(false);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to start GitHub connection.",
+      );
     }
   }, []);
 
-  if (status === "loading") {
+  if (info.status === "loading") {
     return (
       <div className="rounded-lg border border-zinc-800 px-5 py-4 text-sm text-zinc-500">
         Checking GitHub connection…
@@ -30,11 +45,14 @@ export function GithubConnection({ status }: { status: GithubStatus }) {
     );
   }
 
-  if (status === "connected") {
+  if (info.status === "connected") {
     return (
       <div className="flex items-center gap-2 rounded-lg border border-zinc-800 px-5 py-4 text-sm text-emerald-400">
         <span aria-hidden>●</span>
         GitHub connected
+        {info.accountLogin && (
+          <span className="text-zinc-500">as @{info.accountLogin}</span>
+        )}
       </div>
     );
   }
@@ -58,6 +76,7 @@ export function GithubConnection({ status }: { status: GithubStatus }) {
       >
         {isRedirecting ? "Redirecting…" : "Connect GitHub"}
       </button>
+      {error && <p className="text-sm text-red-400">{error}</p>}
     </div>
   );
 }

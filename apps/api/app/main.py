@@ -6,7 +6,7 @@ from app.integrations.github import router as github_router
 
 settings = get_settings()
 
-app = FastAPI(title="BugLens API")
+app = FastAPI(title="BugLens API", servers=[{"url": settings.backend_base_url}])
 
 app.add_middleware(
     CORSMiddleware,

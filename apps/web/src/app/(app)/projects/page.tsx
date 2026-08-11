@@ -6,15 +6,53 @@ import { CreateProjectForm } from "./_components/create-project-form";
 import { EmptyState } from "./_components/empty-state";
 import {
   GithubConnection,
-  type GithubStatus,
+  type GithubConnectionInfo,
 } from "./_components/github-connection";
 import { ProjectCard } from "./_components/project-card";
 import type { Project } from "./_components/types";
 
+const GITHUB_ERROR_MESSAGES: Record<string, string> = {
+  invalid_state:
+    "That GitHub connection request expired or was invalid. Please try again.",
+  missing_code:
+    "GitHub did not return an authorization code. Please try again.",
+  oauth_failed:
+    "We couldn't complete the GitHub authorization. Please try again.",
+  app_not_installed:
+    "Install the BugLens GitHub App for your account, then try connecting again.",
+};
+
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [isCreating, setIsCreating] = useState(false);
-  const [githubStatus, setGithubStatus] = useState<GithubStatus>("loading");
+  const [githubInfo, setGithubInfo] = useState<GithubConnectionInfo>({
+    status: "loading",
+    accountLogin: null,
+  });
+  const [githubError] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const errorCode = new URLSearchParams(window.location.search).get(
+      "github_error",
+    );
+    if (!errorCode) return null;
+    return (
+      GITHUB_ERROR_MESSAGES[errorCode] ??
+      "GitHub connection failed. Please try again."
+    );
+  });
+
+  useEffect(() => {
+    if (!githubError) return;
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has("github_error")) return;
+    params.delete("github_error");
+    const query = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      query ? `?${query}` : window.location.pathname,
+    );
+  }, [githubError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -22,13 +60,19 @@ export default function ProjectsPage() {
     async function loadStatus() {
       try {
         const response = await fetch(`${API_BASE_URL}/github/status`);
-        const data = (await response.json()) as { connected: boolean };
+        const data = (await response.json()) as {
+          connected: boolean;
+          account_login: string | null;
+        };
         if (!cancelled) {
-          setGithubStatus(data.connected ? "connected" : "disconnected");
+          setGithubInfo({
+            status: data.connected ? "connected" : "disconnected",
+            accountLogin: data.account_login,
+          });
         }
       } catch {
         if (!cancelled) {
-          setGithubStatus("disconnected");
+          setGithubInfo({ status: "disconnected", accountLogin: null });
         }
       }
     }
@@ -44,7 +88,7 @@ export default function ProjectsPage() {
     setIsCreating(false);
   }
 
-  const isGithubConnected = githubStatus === "connected";
+  const isGithubConnected = githubInfo.status === "connected";
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-6 py-16">
@@ -63,7 +107,13 @@ export default function ProjectsPage() {
         )}
       </div>
 
-      <GithubConnection status={githubStatus} />
+      {githubError && (
+        <p className="rounded-lg border border-red-900/60 bg-red-950/40 px-4 py-3 text-sm text-red-400">
+          {githubError}
+        </p>
+      )}
+
+      <GithubConnection info={githubInfo} />
 
       {isGithubConnected &&
         (isCreating ? (
