@@ -9,6 +9,7 @@ import {
   type GithubConnectionInfo,
 } from "./_components/github-connection";
 import { ProjectCard } from "./_components/project-card";
+import { RepositorySelector } from "./_components/repository-selector";
 import type { Project } from "./_components/types";
 
 const GITHUB_ERROR_MESSAGES: Record<string, string> = {
@@ -116,6 +117,8 @@ export default function ProjectsPage() {
       )}
 
       <GithubConnection info={githubInfo} />
+
+      {isGithubConnected && <RepositorySelector />}
 
       {isGithubConnected &&
         (isCreating ? (

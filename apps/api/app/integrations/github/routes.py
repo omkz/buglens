@@ -89,6 +89,72 @@ async def get_status(
     }
 
 
+@router.get("/repositories")
+async def get_repositories(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, list[github_client.GitHubRepository]]:
+    raw_connection_id = request.session.get(_SESSION_CONNECTION_ID_KEY)
+    if not raw_connection_id:
+        raise HTTPException(status_code=401, detail="GitHub is not connected.")
+
+    try:
+        connection_id = uuid.UUID(raw_connection_id)
+    except (AttributeError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=401, detail="GitHub is not connected."
+        ) from None
+
+    try:
+        connection = await get_connection_by_id(db, connection_id=connection_id)
+    except SQLAlchemyError:
+        logger.exception("github_repositories_db_failed")
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub repositories are temporarily unavailable.",
+        ) from None
+
+    if connection is None:
+        raise HTTPException(status_code=401, detail="GitHub is not connected.")
+
+    try:
+        app_jwt = github_client.create_app_jwt(
+            client_id=settings.github_client_id,
+            private_key=settings.github_private_key,
+        )
+        try:
+            installation_token = await github_client.create_installation_access_token(
+                installation_id=connection.github_installation_id,
+                app_jwt=app_jwt,
+            )
+        finally:
+            del app_jwt
+
+        try:
+            repositories = await github_client.list_installation_repositories(
+                installation_token
+            )
+        finally:
+            del installation_token
+    except (httpx.HTTPError, github_client.GitHubAPIError):
+        logger.exception(
+            "github_repositories_api_failed",
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to load GitHub repositories.",
+        ) from None
+
+    logger.info(
+        "github_repositories_loaded",
+        installation_id=connection.github_installation_id,
+        repository_count=len(repositories),
+    )
+    return {"repositories": repositories}
+
+
 @router.get("/oauth/callback")
 async def github_oauth_callback(
     request: Request,

@@ -1,4 +1,4 @@
-"""Thin GitHub API client for the GitHub App OAuth connection flow.
+"""Thin GitHub API client for OAuth and GitHub App installation access.
 
 Pure HTTP calls only — no FastAPI or storage concerns live here, so this
 module stays easy to test and reason about independently of the routes.
@@ -6,10 +6,12 @@ module stays easy to test and reason about independently of the routes.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
 import httpx
+import jwt
 
 GITHUB_INSTALL_BASE_URL = "https://github.com/apps"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -20,6 +22,10 @@ _REQUEST_TIMEOUT = 10.0
 
 class GitHubOAuthError(RuntimeError):
     """Raised when a GitHub OAuth/API call fails or returns an unexpected result."""
+
+
+class GitHubAPIError(RuntimeError):
+    """Raised when GitHub App authentication or API data is invalid."""
 
 
 @dataclass
@@ -33,6 +39,16 @@ class GitHubInstallation:
     id: int
     app_id: int
     account_login: str | None
+
+
+@dataclass
+class GitHubRepository:
+    id: int
+    name: str
+    full_name: str
+    private: bool
+    default_branch: str
+    html_url: str
 
 
 def build_install_url(*, app_slug: str, state: str) -> str:
@@ -102,6 +118,97 @@ async def fetch_user_installations(access_token: str) -> list[GitHubInstallation
         )
         for item in payload.get("installations", [])
     ]
+
+
+def create_app_jwt(*, client_id: str, private_key: str) -> str:
+    """Create a short-lived GitHub App JWT without retaining key material."""
+    if not client_id or not private_key:
+        raise GitHubAPIError("GitHub App credentials are not configured.")
+
+    now = int(time.time())
+    claims = {
+        "iss": client_id,
+        "iat": now - 60,
+        "exp": now + 600,
+    }
+    normalized_key = private_key.replace("\\n", "\n")
+    try:
+        return jwt.encode(claims, normalized_key, algorithm="RS256")
+    except (jwt.PyJWTError, TypeError, ValueError) as exc:
+        raise GitHubAPIError("Unable to authenticate the GitHub App.") from exc
+
+
+async def create_installation_access_token(
+    *, installation_id: int, app_jwt: str
+) -> str:
+    async with _make_http_client() as http_client:
+        response = await http_client.post(
+            f"{GITHUB_API_BASE_URL}/app/installations/{installation_id}/access_tokens",
+            headers=_auth_headers(app_jwt),
+        )
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise GitHubAPIError(
+            "GitHub returned an invalid installation token response."
+        ) from exc
+    access_token = payload.get("token") if isinstance(payload, dict) else None
+    if not isinstance(access_token, str) or not access_token:
+        raise GitHubAPIError("GitHub did not return an installation access token.")
+    return access_token
+
+
+async def list_installation_repositories(
+    installation_access_token: str,
+) -> list[GitHubRepository]:
+    repositories: list[GitHubRepository] = []
+    page = 1
+
+    async with _make_http_client() as http_client:
+        while True:
+            response = await http_client.get(
+                f"{GITHUB_API_BASE_URL}/installation/repositories",
+                headers=_auth_headers(installation_access_token),
+                params={"per_page": 100, "page": page},
+            )
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise GitHubAPIError(
+                    "GitHub returned an invalid repository response."
+                ) from exc
+            items = payload.get("repositories") if isinstance(payload, dict) else None
+            if not isinstance(items, list):
+                raise GitHubAPIError("GitHub returned an invalid repository response.")
+
+            try:
+                repositories.extend(
+                    GitHubRepository(
+                        id=int(item["id"]),
+                        name=item["name"],
+                        full_name=item["full_name"],
+                        private=item["private"],
+                        default_branch=item["default_branch"],
+                        html_url=item["html_url"],
+                    )
+                    for item in items
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise GitHubAPIError(
+                    "GitHub returned an invalid repository response."
+                ) from exc
+
+            if len(items) < 100:
+                break
+            page += 1
+
+    return repositories
+
+
+def _make_http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
 
 
 def _auth_headers(access_token: str) -> dict[str, str]:
