@@ -61,10 +61,17 @@ async def get_status(
 
     try:
         connection_id = uuid.UUID(raw_connection_id)
-    except ValueError:
+    except (AttributeError, TypeError, ValueError):
         return disconnected
 
-    connection = await get_connection_by_id(db, connection_id=connection_id)
+    try:
+        connection = await get_connection_by_id(db, connection_id=connection_id)
+    except SQLAlchemyError:
+        logger.exception("github_status_db_failed")
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub connection status is temporarily unavailable.",
+        ) from None
     if connection is None:
         # The session points at a connection that no longer exists (e.g.
         # deleted) -- treat as disconnected rather than guessing.

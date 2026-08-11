@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,7 +103,7 @@ async def _upsert_user(
         .values(github_user_id=github_user_id, github_login=github_login)
         .on_conflict_do_update(
             index_elements=[models.User.github_user_id],
-            set_={"github_login": github_login},
+            set_={"github_login": github_login, "updated_at": func.now()},
         )
         .returning(models.User)
     )
@@ -122,7 +122,7 @@ async def _upsert_installation(
         )
         .on_conflict_do_update(
             index_elements=[models.GitHubInstallation.github_installation_id],
-            set_={"account_login": account_login},
+            set_={"account_login": account_login, "updated_at": func.now()},
         )
         .returning(models.GitHubInstallation)
     )

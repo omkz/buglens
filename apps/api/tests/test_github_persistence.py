@@ -12,11 +12,16 @@ functions are monkeypatched instead.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
+from base64 import b64encode
+from datetime import datetime, timezone
+from unittest.mock import Mock
 
+import itsdangerous
 import pytest
-from sqlalchemy import delete, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.config import get_settings
 from app.db import models
@@ -42,6 +47,12 @@ def _database_is_reachable() -> bool:
 requires_database = pytest.mark.skipif(
     not _database_is_reachable(), reason="requires a reachable PostgreSQL database"
 )
+
+
+def _signed_session_cookie(payload: dict[str, str]) -> str:
+    signer = itsdangerous.TimestampSigner(get_settings().session_secret)
+    encoded = b64encode(json.dumps(payload).encode())
+    return signer.sign(encoded).decode()
 
 
 # --- session-based OAuth state (no database required) -----------------
@@ -120,17 +131,11 @@ def test_status_with_malformed_session_connection_id_returns_disconnected():
 
     # Forge a session cookie with a non-UUID connection id, the same way a
     # corrupted/forward-incompatible session could look.
-    settings = get_settings()
-    import itsdangerous
-    import json
-    from base64 import b64encode
-
-    signer = itsdangerous.TimestampSigner(settings.session_secret)
-    payload = b64encode(json.dumps({"github_connection_id": "not-a-uuid"}).encode())
-    cookie_value = signer.sign(payload).decode()
-
     client = TestClient(app)
-    client.cookies.set("buglens_session", cookie_value)
+    client.cookies.set(
+        "buglens_session",
+        _signed_session_cookie({"github_connection_id": "not-a-uuid"}),
+    )
     response = client.get("/github/status")
 
     assert response.status_code == 200
@@ -139,6 +144,62 @@ def test_status_with_malformed_session_connection_id_returns_disconnected():
         "installation_id": None,
         "account_login": None,
     }
+
+
+def test_status_with_missing_referenced_connection_returns_disconnected(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.integrations.github import routes
+    from app.main import app
+
+    async def missing_lookup(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(routes, "get_connection_by_id", missing_lookup)
+
+    client = TestClient(app)
+    client.cookies.set(
+        "buglens_session",
+        _signed_session_cookie({"github_connection_id": str(uuid.uuid4())}),
+    )
+
+    response = client.get("/github/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "connected": False,
+        "installation_id": None,
+        "account_login": None,
+    }
+
+
+def test_status_database_failure_returns_safe_service_unavailable(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.integrations.github import routes
+    from app.main import app
+
+    async def fail_lookup(*args, **kwargs):
+        raise SQLAlchemyError("private database detail")
+
+    test_logger = Mock()
+    monkeypatch.setattr(routes, "get_connection_by_id", fail_lookup)
+    monkeypatch.setattr(routes, "logger", test_logger)
+
+    client = TestClient(app)
+    client.cookies.set(
+        "buglens_session",
+        _signed_session_cookie({"github_connection_id": str(uuid.uuid4())}),
+    )
+
+    response = client.get("/github/status")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "GitHub connection status is temporarily unavailable."
+    }
+    assert "private database detail" not in response.text
+    test_logger.exception.assert_called_once_with("github_status_db_failed")
 
 
 # --- schema-level checks (no database required) ------------------------
@@ -168,6 +229,27 @@ def test_persist_github_connection_is_idempotent_on_reconnect():
                     github_installation_id=test_github_installation_id,
                     account_login="octo-org",
                 )
+                await db.commit()
+
+            old_timestamp = datetime(2000, 1, 1, tzinfo=timezone.utc)
+            async with SessionLocal() as db:
+                await db.execute(
+                    update(models.User)
+                    .where(models.User.id == first.user_id)
+                    .values(updated_at=old_timestamp)
+                )
+                await db.execute(
+                    update(models.GitHubInstallation)
+                    .where(models.GitHubInstallation.id == first.installation_id)
+                    .values(updated_at=old_timestamp)
+                )
+                original_connection_updated_at = (
+                    await db.execute(
+                        select(models.GitHubConnection.updated_at).where(
+                            models.GitHubConnection.id == first.connection_id
+                        )
+                    )
+                ).scalar_one()
                 await db.commit()
 
             # Reconnect the same account with a changed username/account
@@ -224,9 +306,12 @@ def test_persist_github_connection_is_idempotent_on_reconnect():
 
             assert len(users) == 1
             assert users[0].github_login == "octocat-renamed"
+            assert users[0].updated_at > old_timestamp
             assert len(installations) == 1
             assert installations[0].account_login == "octo-org-renamed"
+            assert installations[0].updated_at > old_timestamp
             assert len(connections) == 1
+            assert connections[0].updated_at == original_connection_updated_at
 
             looked_up = await _lookup(second.connection_id)
             assert looked_up is not None

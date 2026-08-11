@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/buglens"
 
-    session_secret: str = "change-me-in-production"
+    session_secret: str
     session_cookie_secure: bool = False
 
 
