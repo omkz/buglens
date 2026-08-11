@@ -4,15 +4,15 @@ Kept separate from API routes and the GitHub integration package
 (app/integrations/github/) -- this module only defines persisted schema,
 nothing about HTTP or GitHub's API lives here.
 
-GitHub OAuth access tokens are intentionally not stored on these models
-yet; the OAuth flow still uses its own temporary in-memory state.
+GitHub OAuth access tokens are intentionally not stored on these models;
+the OAuth callback discards the access token once it has used it.
 """
 
 from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import BigInteger, ForeignKey
+from sqlalchemy import BigInteger, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, CreatedAt, UpdatedAt, UUIDPrimaryKey
@@ -29,22 +29,22 @@ class User(Base):
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[UpdatedAt]
 
-    installations: Mapped[list["GitHubInstallation"]] = relationship(
+    connections: Mapped[list["GitHubConnection"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
 
 
 class GitHubInstallation(Base):
+    """A GitHub App installation on some GitHub account/org.
+
+    Not owned by a single BugLens user -- GitHubConnection is what links a
+    User to the installation(s) they've connected, since the same
+    installation could in principle be visible to more than one user.
+    """
+
     __tablename__ = "github_installations"
 
     id: Mapped[UUIDPrimaryKey]
-    # ON DELETE CASCADE mirrors the ORM's ownership relationship (an
-    # installation cannot outlive its user) at the database level, and
-    # passive_deletes=True on the relationship above lets the DB do that
-    # work instead of SQLAlchemy issuing per-row DELETEs.
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE")
-    )
     github_installation_id: Mapped[int] = mapped_column(
         BigInteger, unique=True, index=True
     )
@@ -52,4 +52,44 @@ class GitHubInstallation(Base):
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[UpdatedAt]
 
-    user: Mapped["User"] = relationship(back_populates="installations")
+    connections: Mapped[list["GitHubConnection"]] = relationship(
+        back_populates="installation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class GitHubConnection(Base):
+    """Links a BugLens User to a GitHubInstallation they've connected.
+
+    Modeled as its own association object (not a bare many-to-many table)
+    so it has an id the browser session can reference directly, and its
+    own timestamps.
+    """
+
+    __tablename__ = "github_connections"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "github_installation_id",
+            name="uq_github_connections_user_installation",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+    # FK to the internal GitHubInstallation.id (UUID primary key) -- not
+    # GitHub's own numeric installation id, which lives at
+    # GitHubInstallation.github_installation_id.
+    github_installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("github_installations.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[CreatedAt]
+    updated_at: Mapped[UpdatedAt]
+
+    user: Mapped["User"] = relationship(back_populates="connections")
+    installation: Mapped["GitHubInstallation"] = relationship(
+        back_populates="connections"
+    )

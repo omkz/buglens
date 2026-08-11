@@ -3,7 +3,7 @@ import uuid
 from pathlib import Path
 
 import pytest
-from sqlalchemy import BigInteger
+from sqlalchemy import BigInteger, UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.config import get_settings
@@ -25,7 +25,11 @@ def test_engine_is_async_and_uses_the_configured_database_url():
 
 
 def test_expected_tables_are_registered_on_the_metadata():
-    assert set(Base.metadata.tables) == {"users", "github_installations"}
+    assert set(Base.metadata.tables) == {
+        "users",
+        "github_installations",
+        "github_connections",
+    }
 
 
 def test_users_table_columns_and_constraints():
@@ -47,12 +51,14 @@ def test_users_table_columns_and_constraints():
     ]
 
 
-def test_github_installations_table_columns_and_constraints():
+def test_github_installations_table_no_longer_owned_by_a_single_user():
+    # GitHubInstallation must not have a direct user_id -- ownership is
+    # only expressed through github_connections now.
     table = Base.metadata.tables["github_installations"]
 
+    assert "user_id" not in table.c
     assert list(table.primary_key.columns.keys()) == ["id"]
     assert isinstance(table.c.github_installation_id.type, BigInteger)
-    assert not table.c.user_id.nullable
     assert not table.c.github_installation_id.nullable
     assert not table.c.account_login.nullable
     assert table.c.created_at.type.timezone is True
@@ -62,25 +68,55 @@ def test_github_installations_table_columns_and_constraints():
     assert "ix_github_installations_github_installation_id" in unique_indexes
 
 
-def test_github_installations_user_id_fk_cascades_on_delete():
-    table = Base.metadata.tables["github_installations"]
+def test_github_connections_table_columns_and_constraints():
+    table = Base.metadata.tables["github_connections"]
 
-    fks = list(table.c.user_id.foreign_keys)
-    assert len(fks) == 1
-    assert fks[0].target_fullname == "users.id"
-    assert fks[0].ondelete == "CASCADE"
+    assert list(table.primary_key.columns.keys()) == ["id"]
+    assert not table.c.user_id.nullable
+    assert not table.c.github_installation_id.nullable
+    assert table.c.created_at.type.timezone is True
+    assert table.c.updated_at.type.timezone is True
+
+    user_fks = list(table.c.user_id.foreign_keys)
+    assert len(user_fks) == 1
+    assert user_fks[0].target_fullname == "users.id"
+    assert user_fks[0].ondelete == "CASCADE"
+
+    installation_fks = list(table.c.github_installation_id.foreign_keys)
+    assert len(installation_fks) == 1
+    assert installation_fks[0].target_fullname == "github_installations.id"
+    assert installation_fks[0].ondelete == "CASCADE"
 
 
-def test_user_installations_relationship_uses_passive_deletes():
-    # Ensures the ORM relationship defers deletion to the DB-level
-    # ON DELETE CASCADE instead of issuing per-row DELETEs itself.
-    relationship = models.User.installations.property
-    assert relationship.passive_deletes is True
-    assert relationship.cascade.delete_orphan
+def test_github_connections_unique_constraint_on_user_and_installation():
+    table = Base.metadata.tables["github_connections"]
+
+    unique_constraints = [
+        c for c in table.constraints if isinstance(c, UniqueConstraint)
+    ]
+    matching = [
+        c
+        for c in unique_constraints
+        if {col.name for col in c.columns} == {"user_id", "github_installation_id"}
+    ]
+    assert len(matching) == 1
+    assert matching[0].name == "uq_github_connections_user_installation"
+
+
+def test_user_and_installation_relationships_use_passive_deletes():
+    # Ensures the ORM relationships defer deletion to the DB-level
+    # ON DELETE CASCADE instead of issuing per-row DELETEs themselves.
+    user_rel = models.User.connections.property
+    assert user_rel.passive_deletes is True
+    assert user_rel.cascade.delete_orphan
+
+    installation_rel = models.GitHubInstallation.connections.property
+    assert installation_rel.passive_deletes is True
+    assert installation_rel.cascade.delete_orphan
 
 
 def test_primary_keys_default_to_application_generated_uuids():
-    for table_name in ("users", "github_installations"):
+    for table_name in ("users", "github_installations", "github_connections"):
         id_default = Base.metadata.tables[table_name].c.id.default
         assert id_default.is_callable
         # SQLAlchemy may wrap/copy the default spec, so check behavior
@@ -88,8 +124,8 @@ def test_primary_keys_default_to_application_generated_uuids():
         assert isinstance(id_default.arg(None), uuid.UUID)
 
 
-def test_no_oauth_token_columns_exist_yet():
-    # This step intentionally doesn't persist GitHub OAuth tokens.
+def test_no_oauth_token_columns_exist_anywhere():
+    # GitHub OAuth access tokens are never persisted.
     for table in Base.metadata.tables.values():
         assert "access_token" not in table.c
         assert "refresh_token" not in table.c
@@ -130,3 +166,4 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     revisions = {rev.revision for rev in script.walk_revisions()}
     assert "52dffc9eb5c6" in revisions  # widen github id columns to bigint
     assert "dd0a9d342031" in revisions  # add ON DELETE CASCADE
+    assert "e56cc05a34c1" in revisions  # normalize into github_connections

@@ -170,3 +170,19 @@ def test_structured_redaction_keeps_json_output_valid(capsys):
     assert payload["client_secret"] == "[REDACTED]"
     assert payload["nested"]["refresh_token"] == "[REDACTED]"
     assert payload["nested"]["installation_id"] == 1
+
+
+def test_session_secret_is_treated_as_sensitive(capsys):
+    configure_logging(level="INFO", log_format="json")
+
+    logger = structlog.get_logger("tests.structured")
+    logger.info(
+        "app_config_loaded",
+        session_secret="fake-session-secret",  # noqa: S106 test fixture, not a real secret
+        session_cookie_secure=False,
+    )
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["session_secret"] == "[REDACTED]"
+    # Unrelated, non-sensitive fields are untouched.
+    assert payload["session_cookie_secure"] is False

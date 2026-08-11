@@ -59,7 +59,9 @@ export default function ProjectsPage() {
 
     async function loadStatus() {
       try {
-        const response = await fetch(`${API_BASE_URL}/github/status`);
+        const response = await fetch(`${API_BASE_URL}/github/status`, {
+          credentials: "include",
+        });
         const data = (await response.json()) as {
           connected: boolean;
           account_login: string | null;

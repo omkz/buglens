@@ -2,26 +2,35 @@
 
 from __future__ import annotations
 
+import secrets
+import uuid
+
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
+from app.db.session import get_db
 
 from . import client as github_client
+from .repository import get_connection_by_id, persist_github_connection
 from .selection import InstallationSelectionError, select_installation
-from .state import GitHubConnection, GitHubConnectionStore, get_connection_store
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/github", tags=["github"])
 
+_SESSION_OAUTH_STATE_KEY = "github_oauth_state"
+_SESSION_CONNECTION_ID_KEY = "github_connection_id"
+
 
 @router.get("/install-url")
 def get_install_url(
+    request: Request,
     settings: Settings = Depends(get_settings),
-    store: GitHubConnectionStore = Depends(get_connection_store),
 ) -> dict[str, str]:
     if not settings.github_app_slug:
         raise HTTPException(
@@ -29,7 +38,9 @@ def get_install_url(
             detail="GitHub App is not configured on this server.",
         )
 
-    state = store.create_pending_state()
+    state = secrets.token_urlsafe(24)
+    request.session[_SESSION_OAUTH_STATE_KEY] = state
+
     url = github_client.build_install_url(
         app_slug=settings.github_app_slug,
         state=state,
@@ -38,22 +49,42 @@ def get_install_url(
 
 
 @router.get("/status")
-def get_status(
-    store: GitHubConnectionStore = Depends(get_connection_store),
+async def get_status(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, bool | int | str | None]:
-    connection = store.get_connection()
+    disconnected = {"connected": False, "installation_id": None, "account_login": None}
+
+    raw_connection_id = request.session.get(_SESSION_CONNECTION_ID_KEY)
+    if not raw_connection_id:
+        return disconnected
+
+    try:
+        connection_id = uuid.UUID(raw_connection_id)
+    except ValueError:
+        return disconnected
+
+    connection = await get_connection_by_id(db, connection_id=connection_id)
     if connection is None:
-        return {"connected": False, "installation_id": None, "account_login": None}
+        # The session points at a connection that no longer exists (e.g.
+        # deleted) -- treat as disconnected rather than guessing.
+        return disconnected
+
+    logger.info(
+        "github_connection_restored",
+        installation_id=connection.github_installation_id,
+    )
 
     return {
         "connected": True,
-        "installation_id": connection.installation_id,
+        "installation_id": connection.github_installation_id,
         "account_login": connection.account_login,
     }
 
 
 @router.get("/oauth/callback")
 async def github_oauth_callback(
+    request: Request,
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
     # GitHub also sends installation_id and setup_action here when "Request
@@ -63,7 +94,7 @@ async def github_oauth_callback(
     installation_id: int | None = Query(default=None),
     setup_action: str | None = Query(default=None),
     settings: Settings = Depends(get_settings),
-    store: GitHubConnectionStore = Depends(get_connection_store),
+    db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
     redirect_target = f"{settings.frontend_base_url}/projects"
 
@@ -73,7 +104,10 @@ async def github_oauth_callback(
         raw_installation_id=installation_id,
     )
 
-    if not store.consume_pending_state(state):
+    # Single-use: pop the expected state so it can never be replayed,
+    # whether or not it ends up matching.
+    expected_state = request.session.pop(_SESSION_OAUTH_STATE_KEY, None)
+    if not expected_state or not state or expected_state != state:
         logger.warning("github_oauth_invalid_state")
         return RedirectResponse(f"{redirect_target}?github_error=invalid_state")
 
@@ -94,6 +128,11 @@ async def github_oauth_callback(
         logger.exception("github_oauth_failed")
         return RedirectResponse(f"{redirect_target}?github_error=oauth_failed")
 
+    # The access token is only needed for the three calls above. It is
+    # never persisted or stored in the session, so drop the reference now
+    # rather than letting it linger for the rest of the request.
+    del access_token
+
     # Never trust a raw installation_id from a query parameter: only accept
     # an installation the authenticated user's own token can see, verified
     # to belong to our GitHub App.
@@ -111,18 +150,30 @@ async def github_oauth_callback(
         )
         return RedirectResponse(f"{redirect_target}?github_error={exc.code}")
 
-    store.save_connection(
-        GitHubConnection(
-            installation_id=selected_installation.id,
-            account_login=user.login,
-            access_token=access_token,
+    try:
+        persisted = await persist_github_connection(
+            db,
+            github_user_id=user.id,
+            github_login=user.login,
+            github_installation_id=selected_installation.id,
+            account_login=selected_installation.account_login or user.login,
         )
-    )
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "github_connection_persist_failed",
+            github_username=user.login,
+        )
+        return RedirectResponse(f"{redirect_target}?github_error=persist_failed")
+
+    # Only safe internal identifiers go in the session -- never credentials.
+    request.session[_SESSION_CONNECTION_ID_KEY] = str(persisted.connection_id)
 
     logger.info(
-        "github_installation_selected",
+        "github_connection_persisted",
         github_username=user.login,
-        installation_id=selected_installation.id,
+        installation_id=persisted.github_installation_id,
         setup_action=setup_action,
     )
 

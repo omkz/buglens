@@ -38,6 +38,7 @@ _SENSITIVE_FIELD_KEYS = frozenset(
         "authorization",
         "cookie",
         "set_cookie",
+        "session_secret",
     }
 )
 
