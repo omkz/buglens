@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "console"
 
+    database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/buglens"
+
 
 @lru_cache
 def get_settings() -> Settings:
