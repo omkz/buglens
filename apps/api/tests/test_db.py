@@ -167,3 +167,27 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     assert "52dffc9eb5c6" in revisions  # widen github id columns to bigint
     assert "dd0a9d342031" in revisions  # add ON DELETE CASCADE
     assert "e56cc05a34c1" in revisions  # normalize into github_connections
+
+
+def test_normalization_migration_backfills_before_dropping_legacy_user_id():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("e56cc05a34c1")
+    migration_source = Path(revision.path).read_text()
+
+    assert revision.revision == "e56cc05a34c1"
+
+    create_position = migration_source.index("op.create_table('github_connections'")
+    backfill_position = migration_source.index("INSERT INTO github_connections")
+    drop_position = migration_source.index(
+        "op.drop_column('github_installations', 'user_id')"
+    )
+    assert create_position < backfill_position < drop_position
+
+    assert "SELECT DISTINCT" in migration_source
+    assert "WHERE github_installations.user_id IS NOT NULL" in migration_source
+    assert "ON CONFLICT (user_id, github_installation_id) DO NOTHING" in migration_source
+    assert "uq_github_connections_user_installation" in migration_source

@@ -17,6 +17,8 @@ down_revision: Union[str, Sequence[str], None] = 'dd0a9d342031'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+FK_NAME = "github_installations_user_id_fkey"
+
 
 def upgrade() -> None:
     """Upgrade schema."""
@@ -31,17 +33,80 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('user_id', 'github_installation_id', name='uq_github_connections_user_installation')
     )
-    op.drop_constraint(op.f('github_installations_user_id_fkey'), 'github_installations', type_='foreignkey')
+
+    # Expand -> backfill -> contract: preserve every legacy installation
+    # owner before removing the old direct relationship. DISTINCT plus the
+    # table's unique constraint prevents duplicate user/installation pairs;
+    # ON CONFLICT is an additional guard if the source shape changes while
+    # this unreleased migration is still being developed.
+    op.execute(
+        sa.text(
+            """
+            INSERT INTO github_connections (
+                id,
+                user_id,
+                github_installation_id,
+                created_at,
+                updated_at
+            )
+            SELECT
+                gen_random_uuid(),
+                legacy_relationships.user_id,
+                legacy_relationships.github_installation_id,
+                now(),
+                now()
+            FROM (
+                SELECT DISTINCT
+                    github_installations.user_id,
+                    github_installations.id AS github_installation_id
+                FROM github_installations
+                WHERE github_installations.user_id IS NOT NULL
+            ) AS legacy_relationships
+            ON CONFLICT (user_id, github_installation_id) DO NOTHING
+            """
+        )
+    )
+
+    op.drop_constraint(FK_NAME, 'github_installations', type_='foreignkey')
     op.drop_column('github_installations', 'user_id')
 
 
 def downgrade() -> None:
     """Downgrade schema.
 
-    Best-effort only: an installation can now be linked to more than one
-    user via github_connections, so there is no single user_id to backfill
-    here. The column is added back nullable, with no data restored.
+    The legacy schema can represent only one user per installation. Restore
+    user_id only when an installation has exactly one distinct associated
+    user; installations shared by multiple users intentionally remain NULL
+    instead of choosing an arbitrary owner. The restored column therefore
+    must remain nullable, unlike the original pre-normalization column.
     """
     op.add_column('github_installations', sa.Column('user_id', sa.Uuid(), nullable=True))
-    op.create_foreign_key(op.f('github_installations_user_id_fkey'), 'github_installations', 'users', ['user_id'], ['id'], ondelete='CASCADE')
+    op.execute(
+        sa.text(
+            """
+            WITH single_user_installations AS (
+                SELECT github_installation_id
+                FROM github_connections
+                GROUP BY github_installation_id
+                HAVING count(DISTINCT user_id) = 1
+            )
+            UPDATE github_installations
+            SET user_id = github_connections.user_id
+            FROM github_connections
+            JOIN single_user_installations
+              ON single_user_installations.github_installation_id =
+                 github_connections.github_installation_id
+            WHERE github_installations.id =
+                  github_connections.github_installation_id
+            """
+        )
+    )
+    op.create_foreign_key(
+        FK_NAME,
+        'github_installations',
+        'users',
+        ['user_id'],
+        ['id'],
+        ondelete='CASCADE',
+    )
     op.drop_table('github_connections')
