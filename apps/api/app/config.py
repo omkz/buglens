@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     backend_base_url: str = "http://localhost:8000"
     github_callback_url: str = "http://localhost:8000/github/oauth/callback"
 
+    log_level: str = "INFO"
+    log_format: str = "console"
+
 
 @lru_cache
 def get_settings() -> Settings:

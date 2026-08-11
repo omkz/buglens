@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import logging
-
 import httpx
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
@@ -14,7 +13,7 @@ from . import client as github_client
 from .selection import InstallationSelectionError, select_installation
 from .state import GitHubConnection, GitHubConnectionStore, get_connection_store
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/github", tags=["github"])
 
@@ -69,17 +68,17 @@ async def github_oauth_callback(
     redirect_target = f"{settings.frontend_base_url}/projects"
 
     logger.info(
-        "GitHub install callback received: setup_action=%s raw_installation_id=%s (unverified)",
-        setup_action,
-        installation_id,
+        "github_oauth_callback_received",
+        setup_action=setup_action,
+        raw_installation_id=installation_id,
     )
 
     if not store.consume_pending_state(state):
-        logger.warning("Rejected GitHub OAuth callback with an invalid/expired state.")
+        logger.warning("github_oauth_invalid_state")
         return RedirectResponse(f"{redirect_target}?github_error=invalid_state")
 
     if not code:
-        logger.warning("GitHub OAuth callback is missing the 'code' parameter.")
+        logger.warning("github_oauth_missing_code")
         return RedirectResponse(f"{redirect_target}?github_error=missing_code")
 
     try:
@@ -92,7 +91,7 @@ async def github_oauth_callback(
         user = await github_client.fetch_authenticated_user(access_token)
         installations = await github_client.fetch_user_installations(access_token)
     except (httpx.HTTPError, github_client.GitHubOAuthError):
-        logger.exception("GitHub OAuth exchange failed.")
+        logger.exception("github_oauth_failed")
         return RedirectResponse(f"{redirect_target}?github_error=oauth_failed")
 
     # Never trust a raw installation_id from a query parameter: only accept
@@ -106,9 +105,9 @@ async def github_oauth_callback(
         )
     except InstallationSelectionError as exc:
         logger.warning(
-            "GitHub installation selection failed for user %s: %s",
-            user.login,
-            exc.code,
+            "github_installation_selection_failed",
+            github_username=user.login,
+            error_code=exc.code,
         )
         return RedirectResponse(f"{redirect_target}?github_error={exc.code}")
 
@@ -118,6 +117,13 @@ async def github_oauth_callback(
             account_login=user.login,
             access_token=access_token,
         )
+    )
+
+    logger.info(
+        "github_installation_selected",
+        github_username=user.login,
+        installation_id=selected_installation.id,
+        setup_action=setup_action,
     )
 
     return RedirectResponse(redirect_target)
