@@ -23,16 +23,15 @@ def get_install_url(
     settings: Settings = Depends(get_settings),
     store: GitHubConnectionStore = Depends(get_connection_store),
 ) -> dict[str, str]:
-    if not settings.github_client_id:
+    if not settings.github_app_slug:
         raise HTTPException(
             status_code=503,
             detail="GitHub App is not configured on this server.",
         )
 
     state = store.create_pending_state()
-    url = github_client.build_authorize_url(
-        client_id=settings.github_client_id,
-        redirect_uri=settings.github_callback_url,
+    url = github_client.build_install_url(
+        app_slug=settings.github_app_slug,
         state=state,
     )
     return {"url": url}
@@ -57,10 +56,22 @@ def get_status(
 async def github_oauth_callback(
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
+    # GitHub also sends installation_id and setup_action here when "Request
+    # user authorization (OAuth) during installation" is enabled. They are
+    # accepted for logging only — never trusted for the connection decision.
+    # See the verification against /user/installations below.
+    installation_id: int | None = Query(default=None),
+    setup_action: str | None = Query(default=None),
     settings: Settings = Depends(get_settings),
     store: GitHubConnectionStore = Depends(get_connection_store),
 ) -> RedirectResponse:
     redirect_target = f"{settings.frontend_base_url}/projects"
+
+    logger.info(
+        "GitHub install callback received: setup_action=%s raw_installation_id=%s (unverified)",
+        setup_action,
+        installation_id,
+    )
 
     if not store.consume_pending_state(state):
         logger.warning("Rejected GitHub OAuth callback with an invalid/expired state.")

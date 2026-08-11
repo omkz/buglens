@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+GITHUB_INSTALL_BASE_URL = "https://github.com/apps"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_API_BASE_URL = "https://api.github.com"
 
@@ -35,15 +35,16 @@ class GitHubInstallation:
     account_login: str | None
 
 
-def build_authorize_url(*, client_id: str, redirect_uri: str, state: str) -> str:
-    query = urlencode(
-        {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "state": state,
-        }
-    )
-    return f"{GITHUB_AUTHORIZE_URL}?{query}"
+def build_install_url(*, app_slug: str, state: str) -> str:
+    """Build the GitHub App installation URL.
+
+    This assumes the App has "Request user authorization (OAuth) during
+    installation" enabled, so GitHub will continue to the App's configured
+    Setup URL (GITHUB_CALLBACK_URL) with `code`, `installation_id`,
+    `setup_action`, and `state` once the user finishes installing.
+    """
+    query = urlencode({"state": state})
+    return f"{GITHUB_INSTALL_BASE_URL}/{app_slug}/installations/new?{query}"
 
 
 async def exchange_code_for_token(
