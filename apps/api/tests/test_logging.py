@@ -56,14 +56,28 @@ def test_sensitive_query_params_are_redacted_from_third_party_logs(capsys):
 
     access_logger = logging.getLogger("uvicorn.access")
     access_logger.info(
-        'GET /github/oauth/callback?code=super-secret-code&state=abc123 HTTP/1.1" 307'
+        'GET /github/oauth/callback?code=super-secret-code&state=super-secret-state'
+        '&installation_id=555 HTTP/1.1" 307'
     )
 
     captured = capsys.readouterr()
     assert "super-secret-code" not in captured.out
+    assert "super-secret-state" not in captured.out
     assert "code=[REDACTED]" in captured.out
+    assert "state=[REDACTED]" in captured.out
     # Non-sensitive params are left untouched.
-    assert "state=abc123" in captured.out
+    assert "installation_id=555" in captured.out
+
+
+def test_oauth_state_redacted_in_query_string(capsys):
+    configure_logging(level="INFO", log_format="console")
+
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.info("GET /github/oauth/callback?state=csrf-token-xyz HTTP/1.1\" 307")
+
+    captured = capsys.readouterr()
+    assert "csrf-token-xyz" not in captured.out
+    assert "state=[REDACTED]" in captured.out
 
 
 def test_sensitive_query_params_are_redacted_from_non_string_args(capsys):
@@ -81,3 +95,78 @@ def test_sensitive_query_params_are_redacted_from_non_string_args(capsys):
     captured = capsys.readouterr()
     assert "topsecret" not in captured.out
     assert "client_secret=[REDACTED]" in captured.out
+
+
+def test_top_level_structured_secret_field_is_redacted(capsys):
+    configure_logging(level="INFO", log_format="json")
+
+    logger = structlog.get_logger("tests.structured")
+    logger.info(
+        "github_oauth_exchange",
+        access_token="fake-user-access-token-value",  # noqa: S106 test fixture, not a real secret
+        github_username="octocat",
+    )
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["access_token"] == "[REDACTED]"
+    # Safe fields are unaffected.
+    assert payload["github_username"] == "octocat"
+
+
+def test_nested_secret_field_is_redacted(capsys):
+    configure_logging(level="INFO", log_format="json")
+
+    logger = structlog.get_logger("tests.structured")
+    logger.info(
+        "github_api_response",
+        request={
+            "headers": {"Authorization": "Bearer fake-nested-secret"},
+            "installation_id": 555,
+        },
+        items=[{"cookie": "fake-session-cookie"}, {"project_id": 42}],
+    )
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["request"]["headers"]["Authorization"] == "[REDACTED]"
+    assert payload["request"]["installation_id"] == 555
+    assert payload["items"][0]["cookie"] == "[REDACTED]"
+    assert payload["items"][1]["project_id"] == 42
+
+
+def test_safe_identifiers_remain_visible(capsys):
+    configure_logging(level="INFO", log_format="json")
+
+    logger = structlog.get_logger("tests.structured")
+    logger.info(
+        "investigation_started",
+        github_username="octocat",
+        installation_id=555,
+        project_id="proj_123",
+        investigation_id="inv_456",
+    )
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["github_username"] == "octocat"
+    assert payload["installation_id"] == 555
+    assert payload["project_id"] == "proj_123"
+    assert payload["investigation_id"] == "inv_456"
+
+
+def test_structured_redaction_keeps_json_output_valid(capsys):
+    configure_logging(level="INFO", log_format="json")
+
+    logger = structlog.get_logger("tests.structured")
+    logger.info(
+        "github_oauth_exchange",
+        state="fake-csrf-state",  # noqa: S106 test fixture, not a real secret
+        client_secret="fake-client-secret",  # noqa: S106 test fixture, not a real secret
+        nested={"refresh_token": "fake-refresh-token", "installation_id": 1},
+    )
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])  # raises if not valid JSON
+    assert payload["state"] == "[REDACTED]"
+    assert payload["client_secret"] == "[REDACTED]"
+    assert payload["nested"]["refresh_token"] == "[REDACTED]"
+    assert payload["nested"]["installation_id"] == 1
