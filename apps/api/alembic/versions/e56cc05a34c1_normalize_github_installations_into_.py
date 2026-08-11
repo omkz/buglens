@@ -72,41 +72,83 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema.
+    """Restore the legacy one-user-per-installation schema safely."""
 
-    The legacy schema can represent only one user per installation. Restore
-    user_id only when an installation has exactly one distinct associated
-    user; installations shared by multiple users intentionally remain NULL
-    instead of choosing an arbitrary owner. The restored column therefore
-    must remain nullable, unlike the original pre-normalization column.
-    """
-    op.add_column('github_installations', sa.Column('user_id', sa.Uuid(), nullable=True))
+    # Old schema can only represent exactly one user per installation.
     op.execute(
         sa.text(
             """
-            WITH single_user_installations AS (
-                SELECT github_installation_id
-                FROM github_connections
-                GROUP BY github_installation_id
-                HAVING count(DISTINCT user_id) = 1
-            )
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM github_installations
+                    LEFT JOIN github_connections
+                      ON github_connections.github_installation_id =
+                         github_installations.id
+                    GROUP BY github_installations.id
+                    HAVING count(DISTINCT github_connections.user_id) <> 1
+                ) THEN
+                    RAISE EXCEPTION
+                        'Cannot downgrade e56cc05a34c1: each GitHub installation must have exactly one user connection';
+                END IF;
+            END
+            $$;
+            """
+        )
+    )
+
+    op.add_column(
+        "github_installations",
+        sa.Column("user_id", sa.Uuid(), nullable=True),
+    )
+
+    op.execute(
+        sa.text(
+            """
             UPDATE github_installations
             SET user_id = github_connections.user_id
             FROM github_connections
-            JOIN single_user_installations
-              ON single_user_installations.github_installation_id =
-                 github_connections.github_installation_id
             WHERE github_installations.id =
                   github_connections.github_installation_id
             """
         )
     )
+
+    # Defensive verification before restoring NOT NULL.
+    op.execute(
+        sa.text(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM github_installations
+                    WHERE user_id IS NULL
+                ) THEN
+                    RAISE EXCEPTION
+                        'Cannot downgrade e56cc05a34c1: failed to restore required installation owner';
+                END IF;
+            END
+            $$;
+            """
+        )
+    )
+
+    op.alter_column(
+        "github_installations",
+        "user_id",
+        existing_type=sa.Uuid(),
+        nullable=False,
+    )
+
     op.create_foreign_key(
         FK_NAME,
-        'github_installations',
-        'users',
-        ['user_id'],
-        ['id'],
-        ondelete='CASCADE',
+        "github_installations",
+        "users",
+        ["user_id"],
+        ["id"],
+        ondelete="CASCADE",
     )
-    op.drop_table('github_connections')
+
+    op.drop_table("github_connections")
