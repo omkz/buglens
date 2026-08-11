@@ -11,6 +11,7 @@ from fastapi.responses import RedirectResponse
 from app.config import Settings, get_settings
 
 from . import client as github_client
+from .selection import InstallationSelectionError, select_installation
 from .state import GitHubConnection, GitHubConnectionStore, get_connection_store
 
 logger = logging.getLogger(__name__)
@@ -95,28 +96,25 @@ async def github_oauth_callback(
         return RedirectResponse(f"{redirect_target}?github_error=oauth_failed")
 
     # Never trust a raw installation_id from a query parameter: only accept
-    # installations the authenticated user's own token can see, matched to
-    # our GitHub App.
-    matching_installation = next(
-        (
-            installation
-            for installation in installations
-            if str(installation.app_id) == settings.github_app_id
-        ),
-        None,
-    )
-
-    if matching_installation is None:
-        logger.warning(
-            "GitHub user %s authorized BugLens but has no installation of app %s.",
-            user.login,
-            settings.github_app_id,
+    # an installation the authenticated user's own token can see, verified
+    # to belong to our GitHub App.
+    try:
+        selected_installation = select_installation(
+            installations,
+            app_id=settings.github_app_id,
+            requested_installation_id=installation_id,
         )
-        return RedirectResponse(f"{redirect_target}?github_error=app_not_installed")
+    except InstallationSelectionError as exc:
+        logger.warning(
+            "GitHub installation selection failed for user %s: %s",
+            user.login,
+            exc.code,
+        )
+        return RedirectResponse(f"{redirect_target}?github_error={exc.code}")
 
     store.save_connection(
         GitHubConnection(
-            installation_id=matching_installation.id,
+            installation_id=selected_installation.id,
             account_login=user.login,
             access_token=access_token,
         )
