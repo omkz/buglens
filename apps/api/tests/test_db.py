@@ -3,7 +3,7 @@ import uuid
 from pathlib import Path
 
 import pytest
-from sqlalchemy import BigInteger, UniqueConstraint
+from sqlalchemy import BigInteger, CheckConstraint, Text, UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.config import get_settings
@@ -30,6 +30,7 @@ def test_expected_tables_are_registered_on_the_metadata():
         "github_installations",
         "github_connections",
         "projects",
+        "investigations",
     }
 
 
@@ -134,6 +135,38 @@ def test_projects_belong_to_installations_with_repository_local_uniqueness():
     assert matching[0].name == "uq_projects_installation_repository"
 
 
+def test_investigations_belong_to_projects_with_pending_default():
+    table = Base.metadata.tables["investigations"]
+
+    assert list(table.primary_key.columns.keys()) == ["id"]
+    assert not table.c.project_id.nullable
+    assert not table.c.title.nullable
+    assert isinstance(table.c.description.type, Text)
+    assert table.c.description.nullable
+    assert not table.c.status.nullable
+    assert table.c.status.server_default.arg == "pending"
+    assert table.c.created_at.type.timezone is True
+    assert table.c.updated_at.type.timezone is True
+
+    project_fks = list(table.c.project_id.foreign_keys)
+    assert len(project_fks) == 1
+    assert project_fks[0].target_fullname == "projects.id"
+    assert project_fks[0].ondelete == "CASCADE"
+
+    status_constraints = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    ]
+    assert len(status_constraints) == 1
+    assert status_constraints[0].name == "ck_investigations_status"
+    for status in ("pending", "running", "completed", "failed"):
+        assert status in str(status_constraints[0].sqltext)
+
+    project_indexes = {index.name: index for index in table.indexes}
+    assert "ix_investigations_project_id" in project_indexes
+
+
 def test_user_and_installation_relationships_use_passive_deletes():
     # Ensures the ORM relationships defer deletion to the DB-level
     # ON DELETE CASCADE instead of issuing per-row DELETEs themselves.
@@ -149,6 +182,10 @@ def test_user_and_installation_relationships_use_passive_deletes():
     assert projects_rel.passive_deletes is True
     assert projects_rel.cascade.delete_orphan
 
+    investigations_rel = models.Project.investigations.property
+    assert investigations_rel.passive_deletes is True
+    assert investigations_rel.cascade.delete_orphan
+
 
 def test_primary_keys_default_to_application_generated_uuids():
     for table_name in (
@@ -156,6 +193,7 @@ def test_primary_keys_default_to_application_generated_uuids():
         "github_installations",
         "github_connections",
         "projects",
+        "investigations",
     ):
         id_default = Base.metadata.tables[table_name].c.id.default
         assert id_default.is_callable
@@ -208,6 +246,7 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     assert "dd0a9d342031" in revisions  # add ON DELETE CASCADE
     assert "e56cc05a34c1" in revisions  # normalize into github_connections
     assert "a8c9d4e1f2b3" in revisions  # add installation-owned projects
+    assert "b4f1c2d3e4a5" in revisions  # add Project-owned investigations
 
 
 def test_projects_migration_is_linear_and_supports_clean_downgrade():
@@ -225,6 +264,24 @@ def test_projects_migration_is_linear_and_supports_clean_downgrade():
     assert 'ondelete="CASCADE"' in migration_source
     assert 'name="uq_projects_installation_repository"' in migration_source
     assert 'op.drop_table("projects")' in migration_source
+
+
+def test_investigations_migration_is_linear_and_supports_clean_downgrade():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("b4f1c2d3e4a5")
+    migration_source = Path(revision.path).read_text()
+
+    assert revision.down_revision == "a8c9d4e1f2b3"
+    assert 'op.create_table(\n        "investigations"' in migration_source
+    assert 'sa.Column("project_id", sa.Uuid()' in migration_source
+    assert 'server_default=sa.text("\'pending\'")' in migration_source
+    assert 'name="ck_investigations_status"' in migration_source
+    assert 'ondelete="CASCADE"' in migration_source
+    assert 'op.drop_table("investigations")' in migration_source
 
 
 def test_normalization_migration_backfills_before_dropping_legacy_user_id():

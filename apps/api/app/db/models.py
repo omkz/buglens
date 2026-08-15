@@ -11,8 +11,15 @@ the OAuth callback discards the access token once it has used it.
 from __future__ import annotations
 
 import uuid
+from enum import StrEnum
 
-from sqlalchemy import BigInteger, ForeignKey, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, CreatedAt, UpdatedAt, UUIDPrimaryKey
@@ -128,3 +135,42 @@ class Project(Base):
     installation: Mapped["GitHubInstallation"] = relationship(
         back_populates="projects"
     )
+    investigations: Mapped[list["Investigation"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class InvestigationStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class Investigation(Base):
+    """A persisted bug report belonging to a BugLens Project."""
+
+    __tablename__ = "investigations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed')",
+            name="ck_investigations_status",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str]
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        default=InvestigationStatus.PENDING.value,
+        server_default=InvestigationStatus.PENDING.value,
+    )
+    created_at: Mapped[CreatedAt]
+    updated_at: Mapped[UpdatedAt]
+
+    project: Mapped["Project"] = relationship(back_populates="investigations")

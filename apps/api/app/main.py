@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import get_settings
+from app.investigations import router as investigations_router
 from app.integrations.github import router as github_router
 from app.logging import configure_logging
 from app.projects import router as projects_router
@@ -39,6 +40,7 @@ app.add_middleware(
 
 app.include_router(github_router)
 app.include_router(projects_router)
+app.include_router(investigations_router)
 
 logger.info("buglens_api_startup", log_format=settings.log_format)
 
