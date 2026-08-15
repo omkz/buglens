@@ -9,15 +9,17 @@ type RepositoryState =
   | { status: "ready"; repositories: GitHubRepository[] }
   | { status: "error"; repositories: GitHubRepository[]; message: string };
 
-export function RepositorySelector() {
+export function RepositorySelector({
+  selectedRepositoryId,
+  onSelect,
+}: {
+  selectedRepositoryId: number | null;
+  onSelect: (repository: GitHubRepository) => void;
+}) {
   const [repositoryState, setRepositoryState] = useState<RepositoryState>({
     status: "loading",
     repositories: [],
   });
-  const [selectedRepositoryId, setSelectedRepositoryId] = useState<
-    number | null
-  >(null);
-
   useEffect(() => {
     let cancelled = false;
 
@@ -64,13 +66,13 @@ export function RepositorySelector() {
   }, []);
 
   return (
-    <section className="flex flex-col gap-4 rounded-lg border border-zinc-800 p-5">
+    <section className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
         <h2 className="text-sm font-medium text-zinc-200">
-          Select a GitHub repository
+          GitHub repository
         </h2>
         <p className="text-sm text-zinc-500">
-          Choose a repository for this setup. Your selection is not saved yet.
+          Choose a repository accessible to the connected GitHub App.
         </p>
       </div>
 
@@ -100,7 +102,7 @@ export function RepositorySelector() {
                 <button
                   type="button"
                   aria-pressed={isSelected}
-                  onClick={() => setSelectedRepositoryId(repository.id)}
+                  onClick={() => onSelect(repository)}
                   className={`flex w-full items-center justify-between gap-4 rounded-md border px-4 py-3 text-left transition-colors ${
                     isSelected
                       ? "border-zinc-500 bg-zinc-800/70"

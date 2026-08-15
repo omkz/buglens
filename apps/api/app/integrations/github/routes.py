@@ -16,7 +16,7 @@ from app.config import Settings, get_settings
 from app.db.session import get_db
 
 from . import client as github_client
-from .keys import resolve_private_key
+from .access import load_installation_repositories
 from .repository import get_connection_by_id, persist_github_connection
 from .selection import InstallationSelectionError, select_installation
 
@@ -120,32 +120,10 @@ async def get_repositories(
         raise HTTPException(status_code=401, detail="GitHub is not connected.")
 
     try:
-        private_key = resolve_private_key(
-            private_key_path=settings.github_private_key_path,
-            private_key=settings.github_private_key,
+        repositories = await load_installation_repositories(
+            settings=settings,
+            github_installation_id=connection.github_installation_id,
         )
-        try:
-            app_jwt = github_client.create_app_jwt(
-                client_id=settings.github_client_id,
-                private_key=private_key,
-            )
-        finally:
-            del private_key
-
-        try:
-            installation_token = await github_client.create_installation_access_token(
-                installation_id=connection.github_installation_id,
-                app_jwt=app_jwt,
-            )
-        finally:
-            del app_jwt
-
-        try:
-            repositories = await github_client.list_installation_repositories(
-                installation_token
-            )
-        finally:
-            del installation_token
     except (httpx.HTTPError, github_client.GitHubAPIError):
         logger.exception(
             "github_repositories_api_failed",

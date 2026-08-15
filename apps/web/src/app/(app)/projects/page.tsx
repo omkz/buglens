@@ -9,8 +9,12 @@ import {
   type GithubConnectionInfo,
 } from "./_components/github-connection";
 import { ProjectCard } from "./_components/project-card";
-import { RepositorySelector } from "./_components/repository-selector";
 import type { Project } from "./_components/types";
+
+type ProjectsState =
+  | { status: "loading"; projects: Project[] }
+  | { status: "ready"; projects: Project[] }
+  | { status: "error"; projects: Project[]; message: string };
 
 const GITHUB_ERROR_MESSAGES: Record<string, string> = {
   invalid_state:
@@ -24,7 +28,10 @@ const GITHUB_ERROR_MESSAGES: Record<string, string> = {
 };
 
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsState, setProjectsState] = useState<ProjectsState>({
+    status: "loading",
+    projects: [],
+  });
   const [isCreating, setIsCreating] = useState(false);
   const [githubInfo, setGithubInfo] = useState<GithubConnectionInfo>({
     status: "loading",
@@ -67,15 +74,52 @@ export default function ProjectsPage() {
           connected: boolean;
           account_login: string | null;
         };
+        if (cancelled) return;
+
+        setGithubInfo({
+          status: data.connected ? "connected" : "disconnected",
+          accountLogin: data.account_login,
+        });
+        if (!data.connected) {
+          setProjectsState({ status: "ready", projects: [] });
+          return;
+        }
+
+        const projectsResponse = await fetch(`${API_BASE_URL}/projects`, {
+          credentials: "include",
+        });
+        const projectsBody = (await projectsResponse.json().catch(() => null)) as
+          | { projects?: Project[]; detail?: string }
+          | null;
+        if (!projectsResponse.ok) {
+          throw new Error(
+            projectsBody?.detail ?? "Unable to load your projects.",
+          );
+        }
+        if (!projectsBody || !Array.isArray(projectsBody.projects)) {
+          throw new Error("Unable to load your projects.");
+        }
         if (!cancelled) {
-          setGithubInfo({
-            status: data.connected ? "connected" : "disconnected",
-            accountLogin: data.account_login,
+          setProjectsState({
+            status: "ready",
+            projects: projectsBody.projects,
           });
         }
-      } catch {
+      } catch (error) {
         if (!cancelled) {
-          setGithubInfo({ status: "disconnected", accountLogin: null });
+          setGithubInfo((current) =>
+            current.status === "loading"
+              ? { status: "disconnected", accountLogin: null }
+              : current,
+          );
+          setProjectsState({
+            status: "error",
+            projects: [],
+            message:
+              error instanceof Error
+                ? error.message
+                : "Unable to load your projects.",
+          });
         }
       }
     }
@@ -87,7 +131,10 @@ export default function ProjectsPage() {
   }, []);
 
   function handleCreate(project: Project) {
-    setProjects((prev) => [...prev, project]);
+    setProjectsState((current) => ({
+      status: "ready",
+      projects: [project, ...current.projects],
+    }));
     setIsCreating(false);
   }
 
@@ -118,19 +165,23 @@ export default function ProjectsPage() {
 
       <GithubConnection info={githubInfo} />
 
-      {isGithubConnected && <RepositorySelector />}
-
       {isGithubConnected &&
         (isCreating ? (
           <CreateProjectForm
             onCreate={handleCreate}
             onCancel={() => setIsCreating(false)}
           />
-        ) : projects.length === 0 ? (
+        ) : projectsState.status === "loading" ? (
+          <p className="text-sm text-zinc-500">Loading projects…</p>
+        ) : projectsState.status === "error" ? (
+          <p className="rounded-lg border border-red-900/60 bg-red-950/40 px-4 py-3 text-sm text-red-400">
+            {projectsState.message}
+          </p>
+        ) : projectsState.projects.length === 0 ? (
           <EmptyState onCreate={() => setIsCreating(true)} />
         ) : (
           <ul className="flex flex-col gap-3">
-            {projects.map((project) => (
+            {projectsState.projects.map((project) => (
               <ProjectCard key={project.id} project={project} />
             ))}
           </ul>

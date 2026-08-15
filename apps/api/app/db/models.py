@@ -57,6 +57,11 @@ class GitHubInstallation(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    projects: Mapped[list["Project"]] = relationship(
+        back_populates="installation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class GitHubConnection(Base):
@@ -92,4 +97,34 @@ class GitHubConnection(Base):
     user: Mapped["User"] = relationship(back_populates="connections")
     installation: Mapped["GitHubInstallation"] = relationship(
         back_populates="connections"
+    )
+
+
+class Project(Base):
+    """A BugLens project backed by a repository in an App installation."""
+
+    __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint(
+            "github_installation_id",
+            "github_repository_id",
+            name="uq_projects_installation_repository",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    github_installation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("github_installations.id", ondelete="CASCADE")
+    )
+    name: Mapped[str]
+    github_repository_id: Mapped[int] = mapped_column(BigInteger)
+    github_repository_name: Mapped[str]
+    github_repository_full_name: Mapped[str]
+    default_branch: Mapped[str]
+    app_url: Mapped[str | None]
+    created_at: Mapped[CreatedAt]
+    updated_at: Mapped[UpdatedAt]
+
+    installation: Mapped["GitHubInstallation"] = relationship(
+        back_populates="projects"
     )

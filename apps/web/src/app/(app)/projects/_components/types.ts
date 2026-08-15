@@ -1,9 +1,11 @@
 export type Project = {
   id: string;
   name: string;
-  githubRepo: string;
-  defaultBranch: string;
-  appUrl?: string;
+  github_repository_id: number;
+  github_repository_full_name: string;
+  default_branch: string;
+  app_url: string | null;
+  created_at: string;
 };
 
 export type GitHubRepository = {
