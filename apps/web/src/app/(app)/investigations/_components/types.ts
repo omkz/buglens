@@ -44,3 +44,52 @@ export type AnalysisStatus = {
   status: InvestigationStatus;
   analysis: BugAnalysis | null;
 };
+
+export type BrowserAction =
+  | { type: "goto"; path: string }
+  | { type: "click"; selector: string }
+  | { type: "fill"; selector: string; value: string }
+  | { type: "press"; selector: string; key: string }
+  | { type: "wait_for"; selector: string }
+  | { type: "expect_text"; selector: string; value: string }
+  | { type: "expect_visible"; selector: string }
+  | { type: "expect_url"; value: string };
+
+export type BrowserTestPlan = {
+  name: string;
+  start_path: string;
+  actions: BrowserAction[];
+};
+
+export type AgentRunResult = {
+  repository_findings: Array<{
+    path: string;
+    reason: string;
+    observation: string;
+  }>;
+  duplicate_candidates: Array<{
+    issue_number: number;
+    title: string;
+    url: string;
+    similarity: "low" | "medium" | "high";
+    reason: string;
+  }>;
+  reproduction_plan: BrowserTestPlan | null;
+  generated_test: string | null;
+  reproduction_status: "reproduced" | "not_reproduced" | "blocked" | null;
+  execution: {
+    status: "reproduced" | "not_reproduced" | "blocked";
+    completed_actions: number;
+    failed_action_index: number | null;
+    expected: string | null;
+    actual: string | null;
+    summary: string;
+  } | null;
+  execution_summary: string | null;
+};
+
+export type AgentRunStatus = {
+  investigation_id: string;
+  status: "running" | "completed" | "failed" | null;
+  result: AgentRunResult | null;
+};

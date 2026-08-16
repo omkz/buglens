@@ -29,6 +29,31 @@ from app.integrations.github.repository import (
     PersistedGitHubConnection,
     get_connection_by_id,
 )
+from app.investigation_agent.agent import (
+    AdkRepositoryInvestigationAgent,
+    AgentConfigurationError,
+    AgentProviderError,
+)
+from app.investigation_agent.repository import (
+    AgentRunClaimState,
+    PersistedAgentRun,
+    claim_agent_run,
+    complete_agent_run,
+    get_agent_run as load_agent_run,
+    mark_agent_run_failed,
+)
+from app.investigation_agent.schemas import (
+    BrowserExecutionResult,
+    BrowserTestPlan,
+    DuplicateCandidate,
+    RepositoryFinding,
+)
+from app.investigation_agent.service import (
+    InvestigationAgentService,
+    InvestigationGitHubError,
+    InvestigationResultError,
+)
+from app.investigation_agent.tools.playwright import PlaywrightPlanRunner
 
 from .analyzer import (
     AnalyzerConfigurationError,
@@ -117,6 +142,22 @@ class AnalysisStatusResponse(BaseModel):
     analysis: BugAnalysis | None
 
 
+class AgentRunResultResponse(BaseModel):
+    repository_findings: list[RepositoryFinding]
+    duplicate_candidates: list[DuplicateCandidate]
+    reproduction_plan: BrowserTestPlan | None
+    generated_test: str | None
+    reproduction_status: models.ReproductionStatus | None
+    execution: BrowserExecutionResult | None
+    execution_summary: str | None
+
+
+class AgentRunStatusResponse(BaseModel):
+    investigation_id: uuid.UUID
+    status: models.AgentRunStatus | None
+    result: AgentRunResultResponse | None
+
+
 def get_evidence_storage(
     settings: Settings = Depends(get_settings),
 ) -> EvidenceStorage:
@@ -136,6 +177,20 @@ def get_analyzer_service(
     storage: EvidenceStorage = Depends(get_evidence_storage),
 ) -> InvestigationAnalyzerService:
     return InvestigationAnalyzerService(analyzer, storage)
+
+
+def get_investigation_agent_service(
+    settings: Settings = Depends(get_settings),
+) -> InvestigationAgentService:
+    agent = AdkRepositoryInvestigationAgent(
+        api_key=settings.gemini_api_key,
+        model_name=settings.gemini_model,
+    )
+    runner = PlaywrightPlanRunner(
+        action_timeout_ms=settings.playwright_action_timeout_ms,
+        run_timeout_seconds=settings.playwright_run_timeout_seconds,
+    )
+    return InvestigationAgentService(agent=agent, runner=runner, settings=settings)
 
 
 @router.post(
@@ -603,6 +658,198 @@ async def get_investigation_analysis(
     )
 
 
+@router.post(
+    "/investigations/{investigation_id}/agent-run",
+    response_model=AgentRunStatusResponse,
+)
+async def run_agent_investigation(
+    investigation_id: uuid.UUID,
+    request: Request,
+    agent_service: InvestigationAgentService = Depends(
+        get_investigation_agent_service
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> AgentRunStatusResponse:
+    connection = await _require_connection(request, db)
+    try:
+        claim = await claim_agent_run(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+            agent_model=agent_service.model_name,
+        )
+        if claim.state == AgentRunClaimState.NOT_FOUND:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail="Investigation not found.")
+        if claim.state == AgentRunClaimState.NO_ANALYSIS:
+            await db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail="Analyze the bug evidence before starting investigation.",
+            )
+        if claim.state == AgentRunClaimState.CONFLICT:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="An investigation run is already running or completed.",
+            )
+        await db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "agent_run_claim_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Investigation is temporarily unavailable.",
+        ) from None
+
+    if claim.context is None:
+        raise HTTPException(
+            status_code=503, detail="Investigation is temporarily unavailable."
+        )
+
+    try:
+        result, generated_test, execution = await agent_service.investigate(
+            claim.context
+        )
+    except AgentConfigurationError as exc:
+        await _best_effort_mark_agent_run_failed(db, investigation_id)
+        logger.warning(
+            "agent_run_configuration_missing",
+            investigation_id=str(investigation_id),
+            exception_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503, detail="Autonomous investigation is not configured."
+        ) from None
+    except InvestigationGitHubError as exc:
+        await _best_effort_mark_agent_run_failed(db, investigation_id)
+        logger.warning(
+            "agent_run_github_failed",
+            investigation_id=str(investigation_id),
+            exception_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Repository investigation failed. Please try again.",
+        ) from None
+    except (AgentProviderError, InvestigationResultError) as exc:
+        await _best_effort_mark_agent_run_failed(db, investigation_id)
+        logger.warning(
+            "agent_run_provider_failed",
+            investigation_id=str(investigation_id),
+            exception_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Autonomous investigation failed. Please try again.",
+        ) from None
+
+    try:
+        persisted = await complete_agent_run(
+            db,
+            investigation_id=investigation_id,
+            result=result,
+            generated_test=generated_test,
+            execution=execution,
+        )
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        await _best_effort_mark_agent_run_failed(db, investigation_id)
+        logger.exception(
+            "agent_run_persistence_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Investigation is temporarily unavailable.",
+        ) from None
+    return _agent_run_response(investigation_id, persisted)
+
+
+@router.get(
+    "/investigations/{investigation_id}/agent-run",
+    response_model=AgentRunStatusResponse,
+)
+async def get_agent_investigation(
+    investigation_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> AgentRunStatusResponse:
+    connection = await _require_connection(request, db)
+    try:
+        snapshot = await load_agent_run(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+        )
+    except SQLAlchemyError:
+        logger.exception(
+            "agent_run_read_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503, detail="Investigation is temporarily unavailable."
+        ) from None
+    if not snapshot.accessible:
+        raise HTTPException(status_code=404, detail="Investigation not found.")
+    return _agent_run_response(investigation_id, snapshot.run)
+
+
+def _agent_run_response(
+    investigation_id: uuid.UUID,
+    run: PersistedAgentRun | None,
+) -> AgentRunStatusResponse:
+    if run is None:
+        return AgentRunStatusResponse(
+            investigation_id=investigation_id,
+            status=None,
+            result=None,
+        )
+    result = None
+    if run.status == models.AgentRunStatus.COMPLETED.value:
+        result = AgentRunResultResponse(
+            repository_findings=[
+                RepositoryFinding.model_validate(item)
+                for item in (run.repository_summary or [])
+            ],
+            duplicate_candidates=[
+                DuplicateCandidate.model_validate(item)
+                for item in run.duplicate_candidates
+            ],
+            reproduction_plan=(
+                BrowserTestPlan.model_validate(run.reproduction_plan)
+                if run.reproduction_plan is not None
+                else None
+            ),
+            generated_test=run.generated_test,
+            reproduction_status=(
+                models.ReproductionStatus(run.reproduction_status)
+                if run.reproduction_status is not None
+                else None
+            ),
+            execution=(
+                BrowserExecutionResult.model_validate(run.execution_result)
+                if run.execution_result is not None
+                else None
+            ),
+            execution_summary=run.execution_summary,
+        )
+    return AgentRunStatusResponse(
+        investigation_id=investigation_id,
+        status=models.AgentRunStatus(run.status),
+        result=result,
+    )
+
+
 def _analysis_response(
     investigation_id: uuid.UUID,
     investigation_status: models.InvestigationStatus,
@@ -625,6 +872,20 @@ async def _best_effort_mark_analysis_failed(
         await db.rollback()
         logger.exception(
             "analysis_failure_status_update_failed",
+            investigation_id=str(investigation_id),
+        )
+
+
+async def _best_effort_mark_agent_run_failed(
+    db: AsyncSession, investigation_id: uuid.UUID
+) -> None:
+    try:
+        await mark_agent_run_failed(db, investigation_id=investigation_id)
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "agent_run_failure_status_update_failed",
             investigation_id=str(investigation_id),
         )
 

@@ -11,6 +11,7 @@ the OAuth callback discards the access token once it has used it.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
@@ -187,6 +188,12 @@ class Investigation(Base):
         passive_deletes=True,
         uselist=False,
     )
+    agent_run: Mapped["InvestigationAgentRun | None"] = relationship(
+        back_populates="investigation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
 
 
 class EvidenceKind(StrEnum):
@@ -262,3 +269,57 @@ class InvestigationAnalysis(Base):
     updated_at: Mapped[UpdatedAt]
 
     investigation: Mapped["Investigation"] = relationship(back_populates="analysis")
+
+
+class AgentRunStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ReproductionStatus(StrEnum):
+    REPRODUCED = "reproduced"
+    NOT_REPRODUCED = "not_reproduced"
+    BLOCKED = "blocked"
+
+
+class InvestigationAgentRun(Base):
+    """One current autonomous repository/browser investigation result."""
+
+    __tablename__ = "investigation_agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'completed', 'failed')",
+            name="ck_investigation_agent_runs_status",
+        ),
+        CheckConstraint(
+            "reproduction_status IS NULL OR reproduction_status IN "
+            "('reproduced', 'not_reproduced', 'blocked')",
+            name="ck_investigation_agent_runs_reproduction_status",
+        ),
+        UniqueConstraint(
+            "investigation_id",
+            name="uq_investigation_agent_runs_investigation_id",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    investigation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE")
+    )
+    status: Mapped[str]
+    agent_model: Mapped[str]
+    repository_summary: Mapped[list[dict] | None] = mapped_column(JSONB)
+    duplicate_candidates: Mapped[list[dict]] = mapped_column(JSONB)
+    reproduction_plan: Mapped[dict | None] = mapped_column(JSONB)
+    generated_test: Mapped[str | None] = mapped_column(Text)
+    reproduction_status: Mapped[str | None]
+    execution_result: Mapped[dict | None] = mapped_column(JSONB)
+    execution_summary: Mapped[str | None] = mapped_column(Text)
+    execution_error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime]
+    completed_at: Mapped[datetime | None]
+    created_at: Mapped[CreatedAt]
+    updated_at: Mapped[UpdatedAt]
+
+    investigation: Mapped["Investigation"] = relationship(back_populates="agent_run")

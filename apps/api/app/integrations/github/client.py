@@ -6,9 +6,11 @@ module stays easy to test and reason about independently of the routes.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
-from urllib.parse import urlencode
+from typing import Any
+from urllib.parse import quote, urlencode
 
 import httpx
 import jwt
@@ -49,6 +51,22 @@ class GitHubRepository:
     private: bool
     default_branch: str
     html_url: str
+
+
+@dataclass(frozen=True)
+class GitHubRepositoryFile:
+    path: str
+    size: int
+
+
+@dataclass(frozen=True)
+class GitHubIssue:
+    number: int
+    title: str
+    state: str
+    html_url: str
+    body_excerpt: str
+    labels: list[str]
 
 
 def build_install_url(*, app_slug: str, state: str) -> str:
@@ -207,6 +225,122 @@ async def list_installation_repositories(
     return repositories
 
 
+async def list_repository_tree(
+    installation_access_token: str,
+    *,
+    owner: str,
+    repository: str,
+    ref: str,
+) -> list[GitHubRepositoryFile]:
+    """Return the recursive Git tree for one fixed repository and ref."""
+    repository_url = (
+        f"{GITHUB_API_BASE_URL}/repos/{quote(owner, safe='')}/"
+        f"{quote(repository, safe='')}/git/trees/{quote(ref, safe='')}"
+    )
+    async with _make_http_client() as http_client:
+        response = await http_client.get(
+            repository_url,
+            headers=_auth_headers(installation_access_token),
+            params={"recursive": "1"},
+        )
+    response.raise_for_status()
+    payload = _json_object(response, "repository tree")
+    tree = payload.get("tree")
+    if not isinstance(tree, list):
+        raise GitHubAPIError("GitHub returned an invalid repository tree response.")
+
+    files: list[GitHubRepositoryFile] = []
+    try:
+        for item in tree:
+            if item.get("type") != "blob":
+                continue
+            files.append(
+                GitHubRepositoryFile(path=item["path"], size=int(item.get("size", 0)))
+            )
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise GitHubAPIError(
+            "GitHub returned an invalid repository tree response."
+        ) from exc
+    return files
+
+
+async def read_repository_file(
+    installation_access_token: str,
+    *,
+    owner: str,
+    repository: str,
+    path: str,
+    ref: str,
+) -> dict[str, Any]:
+    """Fetch one repository content object without decoding it."""
+    content_url = (
+        f"{GITHUB_API_BASE_URL}/repos/{quote(owner, safe='')}/"
+        f"{quote(repository, safe='')}/contents/{quote(path, safe='/')}"
+    )
+    async with _make_http_client() as http_client:
+        response = await http_client.get(
+            content_url,
+            headers=_auth_headers(installation_access_token),
+            params={"ref": ref},
+        )
+    response.raise_for_status()
+    return _json_object(response, "repository file")
+
+
+async def search_repository_issues(
+    installation_access_token: str,
+    *,
+    owner: str,
+    repository: str,
+    query: str,
+    limit: int = 10,
+) -> list[GitHubIssue]:
+    """Search issues in one fixed repository; pull requests are excluded."""
+    bounded_limit = max(1, min(limit, 10))
+    terms = [
+        term
+        for term in re.findall(r"[A-Za-z0-9_.-]{2,64}", query[:500])
+        if term.upper() not in {"AND", "OR", "NOT"}
+    ][:20]
+    if not terms:
+        raise GitHubAPIError("Issue search query has no usable terms.")
+    qualified_query = f"{' '.join(terms)} repo:{owner}/{repository} is:issue"
+    async with _make_http_client() as http_client:
+        response = await http_client.get(
+            f"{GITHUB_API_BASE_URL}/search/issues",
+            headers=_auth_headers(installation_access_token),
+            params={"q": qualified_query, "per_page": bounded_limit},
+        )
+    response.raise_for_status()
+    payload = _json_object(response, "issue search")
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise GitHubAPIError("GitHub returned an invalid issue search response.")
+
+    issues: list[GitHubIssue] = []
+    try:
+        for item in items[:bounded_limit]:
+            labels = [
+                label.get("name", "")
+                for label in item.get("labels", [])
+                if isinstance(label, dict) and isinstance(label.get("name"), str)
+            ]
+            body = item.get("body") or ""
+            issues.append(
+                GitHubIssue(
+                    number=int(item["number"]),
+                    title=str(item["title"])[:500],
+                    state=str(item["state"]),
+                    html_url=str(item["html_url"]),
+                    body_excerpt=str(body)[:2_000],
+                    labels=labels[:20],
+                )
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GitHubAPIError("GitHub returned an invalid issue search response.") from exc
+    return issues
+
+
 def _make_http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
 
@@ -217,3 +351,13 @@ def _auth_headers(access_token: str) -> dict[str, str]:
         "Authorization": f"Bearer {access_token}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+def _json_object(response: httpx.Response, resource: str) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise GitHubAPIError(f"GitHub returned an invalid {resource} response.") from exc
+    if not isinstance(payload, dict):
+        raise GitHubAPIError(f"GitHub returned an invalid {resource} response.")
+    return payload

@@ -34,6 +34,7 @@ def test_expected_tables_are_registered_on_the_metadata():
         "investigations",
         "investigation_evidence",
         "investigation_analyses",
+        "investigation_agent_runs",
     }
 
 
@@ -288,6 +289,11 @@ def test_user_and_installation_relationships_use_passive_deletes():
     assert analysis_rel.cascade.delete_orphan
     assert analysis_rel.uselist is False
 
+    agent_run_rel = models.Investigation.agent_run.property
+    assert agent_run_rel.passive_deletes is True
+    assert agent_run_rel.cascade.delete_orphan
+    assert agent_run_rel.uselist is False
+
 
 def test_primary_keys_default_to_application_generated_uuids():
     for table_name in (
@@ -298,6 +304,7 @@ def test_primary_keys_default_to_application_generated_uuids():
         "investigations",
         "investigation_evidence",
         "investigation_analyses",
+        "investigation_agent_runs",
     ):
         id_default = Base.metadata.tables[table_name].c.id.default
         assert id_default.is_callable
@@ -311,6 +318,8 @@ def test_no_oauth_token_columns_exist_anywhere():
     for table in Base.metadata.tables.values():
         assert "access_token" not in table.c
         assert "refresh_token" not in table.c
+        assert "installation_token" not in table.c
+        assert "gemini_api_key" not in table.c
 
 
 def test_get_db_dependency_yields_an_async_session_and_cleans_up():
@@ -353,6 +362,7 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     assert "b4f1c2d3e4a5" in revisions  # add Project-owned investigations
     assert "c5a6b7d8e9f0" in revisions  # add Investigation-owned evidence
     assert "d6b7c8e9f0a1" in revisions  # add current structured analysis
+    assert "e7c8d9f0a1b2" in revisions  # add autonomous investigation runs
 
 
 def test_projects_migration_is_linear_and_supports_clean_downgrade():
@@ -423,6 +433,52 @@ def test_analysis_migration_is_linear_and_supports_clean_downgrade():
     assert 'name="ck_investigation_analyses_confidence"' in migration_source
     assert 'ondelete="CASCADE"' in migration_source
     assert 'op.drop_table("investigation_analyses")' in migration_source
+
+
+def test_agent_run_migration_is_linear_and_supports_clean_downgrade():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("e7c8d9f0a1b2")
+    migration_source = Path(revision.path).read_text()
+
+    assert revision.down_revision == "d6b7c8e9f0a1"
+    assert 'op.create_table(\n        "investigation_agent_runs"' in migration_source
+    assert 'postgresql.JSONB()' in migration_source
+    assert 'name="uq_investigation_agent_runs_investigation_id"' in migration_source
+    assert 'name="ck_investigation_agent_runs_status"' in migration_source
+    assert 'ondelete="CASCADE"' in migration_source
+    assert 'op.drop_table("investigation_agent_runs")' in migration_source
+
+
+def test_agent_run_model_has_one_current_run_and_safe_status_constraints():
+    table = Base.metadata.tables["investigation_agent_runs"]
+
+    assert list(table.primary_key.columns.keys()) == ["id"]
+    assert isinstance(table.c.repository_summary.type, JSONB)
+    assert isinstance(table.c.duplicate_candidates.type, JSONB)
+    assert isinstance(table.c.reproduction_plan.type, JSONB)
+    assert isinstance(table.c.execution_result.type, JSONB)
+    assert isinstance(table.c.generated_test.type, Text)
+    assert table.c.started_at.type.timezone is True
+    assert table.c.completed_at.type.timezone is True
+    assert list(table.c.investigation_id.foreign_keys)[0].ondelete == "CASCADE"
+
+    unique_names = {
+        constraint.name
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    check_names = {
+        constraint.name
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert "uq_investigation_agent_runs_investigation_id" in unique_names
+    assert "ck_investigation_agent_runs_status" in check_names
+    assert "ck_investigation_agent_runs_reproduction_status" in check_names
 
 
 def test_normalization_migration_backfills_before_dropping_legacy_user_id():

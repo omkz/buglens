@@ -19,6 +19,14 @@ from app.integrations.github.repository import (
     PersistedGitHubConnection,
     persist_github_connection,
 )
+from app.investigation_agent.repository import (
+    AgentRunClaimState,
+    claim_agent_run,
+    complete_agent_run,
+    get_agent_run,
+    mark_agent_run_failed,
+)
+from app.investigation_agent.schemas import AgentInvestigationResult
 from app.investigations.analyzer import BugAnalysis
 from app.investigations.repository import (
     AnalysisClaimState,
@@ -494,6 +502,69 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert completed is not None
                 assert completed.status == "completed"
 
+                inaccessible_run = await claim_agent_run(
+                    db,
+                    installation_id=second_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                    agent_model="gemini-test-model",
+                )
+                assert inaccessible_run.state == AgentRunClaimState.NOT_FOUND
+
+                agent_claim = await claim_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                    agent_model="gemini-test-model",
+                )
+                assert agent_claim.state == AgentRunClaimState.READY
+                assert agent_claim.context is not None
+                assert agent_claim.context.repository_full_name == "first-org/first-repo"
+                await db.commit()
+
+                concurrent_claim = await claim_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                    agent_model="gemini-test-model",
+                )
+                assert concurrent_claim.state == AgentRunClaimState.CONFLICT
+                await db.rollback()
+
+                await mark_agent_run_failed(
+                    db, investigation_id=first_investigation.id
+                )
+                await db.commit()
+                retry_run = await claim_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                    agent_model="gemini-test-model",
+                )
+                assert retry_run.state == AgentRunClaimState.READY
+                await db.commit()
+                persisted_run = await complete_agent_run(
+                    db,
+                    investigation_id=first_investigation.id,
+                    result=AgentInvestigationResult(
+                        repository_findings=[],
+                        duplicate_candidates=[],
+                        reproduction_plan=None,
+                        cannot_reproduce_reason="No app URL configured.",
+                    ),
+                    generated_test=None,
+                    execution=None,
+                )
+                await db.commit()
+                assert persisted_run.status == "completed"
+                run_snapshot = await get_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert run_snapshot.accessible is True
+                assert run_snapshot.run is not None
+                assert run_snapshot.run.id == persisted_run.id
+
                 visible = await list_investigations(
                     db, installation_id=first_connection.installation_id
                 )
@@ -537,6 +608,14 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                     )
                 ).scalar_one_or_none()
                 assert deleted_analysis is None
+                deleted_agent_run = (
+                    await db.execute(
+                        select(models.InvestigationAgentRun).where(
+                            models.InvestigationAgentRun.id == persisted_run.id
+                        )
+                    )
+                ).scalar_one_or_none()
+                assert deleted_agent_run is None
         finally:
             async with SessionLocal() as db:
                 await db.execute(
