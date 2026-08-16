@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from pathlib import PurePath
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.db import models
 from app.db.session import get_db
 from app.integrations.github.repository import (
@@ -18,10 +30,20 @@ from app.integrations.github.repository import (
     get_connection_by_id,
 )
 
+from .evidence_storage import (
+    EmptyRecordingError,
+    EvidenceStorage,
+    EvidenceStorageError,
+    RecordingTooLargeError,
+)
 from .repository import (
+    EvidenceDraft,
     PersistedInvestigation,
+    create_evidence_items,
     create_investigation as persist_investigation,
     get_investigation as load_investigation,
+    get_recording_evidence,
+    list_evidence_items,
     list_investigations as load_investigations,
 )
 
@@ -30,6 +52,8 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["investigations"])
 
 _SESSION_CONNECTION_ID_KEY = "github_connection_id"
+_MAX_LOG_CHARACTERS = 100_000
+_RECORDING_MIME_TYPES = {"video/webm", "video/mp4"}
 
 
 class CreateInvestigationRequest(BaseModel):
@@ -54,6 +78,28 @@ class InvestigationResponse(BaseModel):
 
 class InvestigationListResponse(BaseModel):
     investigations: list[InvestigationResponse]
+
+
+class EvidenceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: models.EvidenceKind
+    mime_type: str | None
+    filename: str | None
+    size_bytes: int | None
+    text_content: str | None
+    created_at: datetime
+
+
+class EvidenceListResponse(BaseModel):
+    evidence: list[EvidenceResponse]
+
+
+def get_evidence_storage(
+    settings: Settings = Depends(get_settings),
+) -> EvidenceStorage:
+    return EvidenceStorage(settings.evidence_storage_dir)
 
 
 @router.post(
@@ -157,6 +203,266 @@ async def get_investigation(
     if investigation is None:
         raise HTTPException(status_code=404, detail="Investigation not found.")
     return investigation
+
+
+@router.post(
+    "/investigations/{investigation_id}/evidence",
+    response_model=EvidenceListResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_investigation_evidence(
+    investigation_id: uuid.UUID,
+    request: Request,
+    recording: UploadFile | None = File(default=None),
+    logs: str | None = Form(default=None),
+    settings: Settings = Depends(get_settings),
+    storage: EvidenceStorage = Depends(get_evidence_storage),
+    db: AsyncSession = Depends(get_db),
+) -> EvidenceListResponse:
+    connection = await _require_connection(request, db)
+    await _require_investigation(
+        db,
+        installation_id=connection.installation_id,
+        investigation_id=investigation_id,
+    )
+
+    has_logs = logs is not None and bool(logs.strip())
+    if recording is None and not has_logs:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide a recording or logs.",
+        )
+    if logs is not None and len(logs) > _MAX_LOG_CHARACTERS:
+        raise HTTPException(status_code=413, detail="Logs are too large.")
+
+    drafts: list[EvidenceDraft] = []
+    stored_key: str | None = None
+    if recording is not None:
+        mime_type = (recording.content_type or "").lower().strip()
+        if mime_type.split(";", 1)[0] not in _RECORDING_MIME_TYPES:
+            raise HTTPException(
+                status_code=415,
+                detail="Recording must be a WebM or MP4 video.",
+            )
+        evidence_id = uuid.uuid4()
+        try:
+            stored = await storage.save_recording(
+                recording,
+                investigation_id=investigation_id,
+                evidence_id=evidence_id,
+                mime_type=mime_type,
+                max_bytes=settings.max_evidence_upload_bytes,
+            )
+        except EmptyRecordingError:
+            raise HTTPException(status_code=400, detail="Recording is empty.") from None
+        except RecordingTooLargeError:
+            raise HTTPException(
+                status_code=413, detail="Recording is too large."
+            ) from None
+        except EvidenceStorageError:
+            logger.exception(
+                "evidence_storage_write_failed",
+                investigation_id=str(investigation_id),
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Evidence storage is temporarily unavailable.",
+            ) from None
+        stored_key = stored.storage_key
+        drafts.append(
+            EvidenceDraft(
+                id=evidence_id,
+                kind=models.EvidenceKind.RECORDING.value,
+                mime_type=mime_type,
+                filename=_safe_filename(recording.filename, mime_type),
+                storage_key=stored.storage_key,
+                size_bytes=stored.size_bytes,
+                text_content=None,
+            )
+        )
+
+    if has_logs:
+        drafts.append(
+            EvidenceDraft(
+                id=uuid.uuid4(),
+                kind=models.EvidenceKind.LOGS.value,
+                mime_type="text/plain",
+                filename=None,
+                storage_key=None,
+                size_bytes=None,
+                text_content=logs,
+            )
+        )
+
+    try:
+        evidence = await create_evidence_items(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+            items=drafts,
+        )
+        if evidence is None:
+            await _delete_stored_recording(storage, stored_key, investigation_id)
+            raise HTTPException(status_code=404, detail="Investigation not found.")
+        await db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        await db.rollback()
+        await _delete_stored_recording(storage, stored_key, investigation_id)
+        logger.exception(
+            "evidence_create_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence is temporarily unavailable.",
+        ) from None
+
+    logger.info(
+        "evidence_created",
+        investigation_id=str(investigation_id),
+        evidence_count=len(evidence),
+        installation_id=connection.github_installation_id,
+    )
+    return EvidenceListResponse(
+        evidence=[EvidenceResponse.model_validate(item) for item in evidence]
+    )
+
+
+@router.get(
+    "/investigations/{investigation_id}/evidence",
+    response_model=EvidenceListResponse,
+)
+async def get_investigation_evidence(
+    investigation_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> EvidenceListResponse:
+    connection = await _require_connection(request, db)
+    try:
+        evidence = await list_evidence_items(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+        )
+    except SQLAlchemyError:
+        logger.exception(
+            "evidence_list_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence is temporarily unavailable.",
+        ) from None
+    if evidence is None:
+        raise HTTPException(status_code=404, detail="Investigation not found.")
+    return EvidenceListResponse(
+        evidence=[EvidenceResponse.model_validate(item) for item in evidence]
+    )
+
+
+@router.get(
+    "/investigations/{investigation_id}/evidence/{evidence_id}/content",
+    response_class=FileResponse,
+)
+async def get_investigation_evidence_content(
+    investigation_id: uuid.UUID,
+    evidence_id: uuid.UUID,
+    request: Request,
+    storage: EvidenceStorage = Depends(get_evidence_storage),
+    db: AsyncSession = Depends(get_db),
+) -> FileResponse:
+    connection = await _require_connection(request, db)
+    try:
+        evidence = await get_recording_evidence(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+            evidence_id=evidence_id,
+        )
+    except SQLAlchemyError:
+        logger.exception(
+            "evidence_content_lookup_failed",
+            investigation_id=str(investigation_id),
+            evidence_id=str(evidence_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence is temporarily unavailable.",
+        ) from None
+    if evidence is None or evidence.storage_key is None:
+        raise HTTPException(status_code=404, detail="Evidence not found.")
+
+    try:
+        path = storage.resolve_content(evidence.storage_key)
+    except EvidenceStorageError:
+        logger.exception(
+            "evidence_storage_read_failed",
+            investigation_id=str(investigation_id),
+            evidence_id=str(evidence_id),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence storage is temporarily unavailable.",
+        ) from None
+    return FileResponse(path, media_type=evidence.mime_type or "video/webm")
+
+
+async def _require_investigation(
+    db: AsyncSession,
+    *,
+    installation_id: uuid.UUID,
+    investigation_id: uuid.UUID,
+) -> PersistedInvestigation:
+    try:
+        investigation = await load_investigation(
+            db,
+            installation_id=installation_id,
+            investigation_id=investigation_id,
+        )
+    except SQLAlchemyError:
+        logger.exception(
+            "evidence_investigation_lookup_failed",
+            investigation_id=str(investigation_id),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Evidence is temporarily unavailable.",
+        ) from None
+    if investigation is None:
+        raise HTTPException(status_code=404, detail="Investigation not found.")
+    return investigation
+
+
+def _safe_filename(filename: str | None, mime_type: str) -> str:
+    name = PurePath((filename or "").replace("\\", "/")).name
+    name = "".join(character for character in name if character.isprintable()).strip()
+    if not name:
+        extension = (
+            ".mp4" if mime_type.split(";", 1)[0] == "video/mp4" else ".webm"
+        )
+        name = f"recording{extension}"
+    return name[:255]
+
+
+async def _delete_stored_recording(
+    storage: EvidenceStorage,
+    storage_key: str | None,
+    investigation_id: uuid.UUID,
+) -> None:
+    if storage_key is None:
+        return
+    try:
+        await storage.delete(storage_key)
+    except EvidenceStorageError:
+        logger.exception(
+            "evidence_storage_cleanup_failed",
+            investigation_id=str(investigation_id),
+        )
 
 
 async def _require_connection(

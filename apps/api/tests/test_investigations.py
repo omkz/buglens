@@ -20,9 +20,12 @@ from app.integrations.github.repository import (
     persist_github_connection,
 )
 from app.investigations.repository import (
+    EvidenceDraft,
     PersistedInvestigation,
+    create_evidence_items,
     create_investigation,
     get_investigation,
+    list_evidence_items,
     list_investigations,
 )
 from app.projects.repository import create_project
@@ -402,6 +405,34 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 await db.commit()
 
                 assert first_investigation.status == "pending"
+                first_evidence_id = uuid.uuid4()
+                first_evidence = await create_evidence_items(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                    items=[
+                        EvidenceDraft(
+                            id=first_evidence_id,
+                            kind="logs",
+                            mime_type="text/plain",
+                            filename=None,
+                            storage_key=None,
+                            size_bytes=None,
+                            text_content="checkout failed",
+                        )
+                    ],
+                )
+                assert first_evidence is not None
+                assert (
+                    await list_evidence_items(
+                        db,
+                        installation_id=second_connection.installation_id,
+                        investigation_id=first_investigation.id,
+                    )
+                    is None
+                )
+                await db.commit()
+
                 visible = await list_investigations(
                     db, installation_id=first_connection.installation_id
                 )
@@ -429,6 +460,14 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                     )
                 ).scalar_one_or_none()
                 assert deleted is None
+                deleted_evidence = (
+                    await db.execute(
+                        select(models.InvestigationEvidence).where(
+                            models.InvestigationEvidence.id == first_evidence_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                assert deleted_evidence is None
         finally:
             async with SessionLocal() as db:
                 await db.execute(

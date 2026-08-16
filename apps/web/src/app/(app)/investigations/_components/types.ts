@@ -14,3 +14,15 @@ export type Investigation = {
   status: InvestigationStatus;
   created_at: string;
 };
+
+export type EvidenceKind = "recording" | "logs";
+
+export type InvestigationEvidence = {
+  id: string;
+  kind: EvidenceKind;
+  mime_type: string | null;
+  filename: string | null;
+  size_bytes: number | null;
+  text_content: string | null;
+  created_at: string;
+};

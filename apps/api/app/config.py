@@ -1,5 +1,7 @@
 from functools import lru_cache
+from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +26,9 @@ class Settings(BaseSettings):
     log_format: str = "console"
 
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/buglens"
+
+    evidence_storage_dir: Path = Path(".data/evidence")
+    max_evidence_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
 
     session_secret: str
     session_cookie_secure: bool = False

@@ -31,6 +31,7 @@ def test_expected_tables_are_registered_on_the_metadata():
         "github_connections",
         "projects",
         "investigations",
+        "investigation_evidence",
     }
 
 
@@ -167,6 +168,41 @@ def test_investigations_belong_to_projects_with_pending_default():
     assert "ix_investigations_project_id" in project_indexes
 
 
+def test_investigation_evidence_metadata_and_constraints():
+    table = Base.metadata.tables["investigation_evidence"]
+
+    assert list(table.primary_key.columns.keys()) == ["id"]
+    assert not table.c.investigation_id.nullable
+    assert not table.c.kind.nullable
+    assert table.c.mime_type.nullable
+    assert table.c.filename.nullable
+    assert table.c.storage_key.nullable
+    assert isinstance(table.c.size_bytes.type, BigInteger)
+    assert table.c.size_bytes.nullable
+    assert isinstance(table.c.text_content.type, Text)
+    assert table.c.text_content.nullable
+    assert table.c.created_at.type.timezone is True
+    assert table.c.updated_at.type.timezone is True
+
+    investigation_fks = list(table.c.investigation_id.foreign_keys)
+    assert len(investigation_fks) == 1
+    assert investigation_fks[0].target_fullname == "investigations.id"
+    assert investigation_fks[0].ondelete == "CASCADE"
+
+    kind_constraints = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    ]
+    assert len(kind_constraints) == 1
+    assert kind_constraints[0].name == "ck_investigation_evidence_kind"
+    assert "recording" in str(kind_constraints[0].sqltext)
+    assert "logs" in str(kind_constraints[0].sqltext)
+
+    indexes = {index.name: index for index in table.indexes}
+    assert "ix_investigation_evidence_investigation_id" in indexes
+
+
 def test_user_and_installation_relationships_use_passive_deletes():
     # Ensures the ORM relationships defer deletion to the DB-level
     # ON DELETE CASCADE instead of issuing per-row DELETEs themselves.
@@ -186,6 +222,10 @@ def test_user_and_installation_relationships_use_passive_deletes():
     assert investigations_rel.passive_deletes is True
     assert investigations_rel.cascade.delete_orphan
 
+    evidence_rel = models.Investigation.evidence_items.property
+    assert evidence_rel.passive_deletes is True
+    assert evidence_rel.cascade.delete_orphan
+
 
 def test_primary_keys_default_to_application_generated_uuids():
     for table_name in (
@@ -194,6 +234,7 @@ def test_primary_keys_default_to_application_generated_uuids():
         "github_connections",
         "projects",
         "investigations",
+        "investigation_evidence",
     ):
         id_default = Base.metadata.tables[table_name].c.id.default
         assert id_default.is_callable
@@ -247,6 +288,7 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     assert "e56cc05a34c1" in revisions  # normalize into github_connections
     assert "a8c9d4e1f2b3" in revisions  # add installation-owned projects
     assert "b4f1c2d3e4a5" in revisions  # add Project-owned investigations
+    assert "c5a6b7d8e9f0" in revisions  # add Investigation-owned evidence
 
 
 def test_projects_migration_is_linear_and_supports_clean_downgrade():
@@ -282,6 +324,23 @@ def test_investigations_migration_is_linear_and_supports_clean_downgrade():
     assert 'name="ck_investigations_status"' in migration_source
     assert 'ondelete="CASCADE"' in migration_source
     assert 'op.drop_table("investigations")' in migration_source
+
+
+def test_evidence_migration_is_linear_and_supports_clean_downgrade():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("c5a6b7d8e9f0")
+    migration_source = Path(revision.path).read_text()
+
+    assert revision.down_revision == "b4f1c2d3e4a5"
+    assert 'op.create_table(\n        "investigation_evidence"' in migration_source
+    assert 'sa.Column("size_bytes", sa.BigInteger()' in migration_source
+    assert 'name="ck_investigation_evidence_kind"' in migration_source
+    assert 'ondelete="CASCADE"' in migration_source
+    assert 'op.drop_table("investigation_evidence")' in migration_source
 
 
 def test_normalization_migration_backfills_before_dropping_legacy_user_id():

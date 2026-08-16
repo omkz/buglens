@@ -174,3 +174,42 @@ class Investigation(Base):
     updated_at: Mapped[UpdatedAt]
 
     project: Mapped["Project"] = relationship(back_populates="investigations")
+    evidence_items: Mapped[list["InvestigationEvidence"]] = relationship(
+        back_populates="investigation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class EvidenceKind(StrEnum):
+    RECORDING = "recording"
+    LOGS = "logs"
+
+
+class InvestigationEvidence(Base):
+    """Metadata for recording or log evidence attached to an Investigation."""
+
+    __tablename__ = "investigation_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('recording', 'logs')",
+            name="ck_investigation_evidence_kind",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    investigation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str]
+    mime_type: Mapped[str | None]
+    filename: Mapped[str | None]
+    storage_key: Mapped[str | None]
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    text_content: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[CreatedAt]
+    updated_at: Mapped[UpdatedAt]
+
+    investigation: Mapped["Investigation"] = relationship(
+        back_populates="evidence_items"
+    )
