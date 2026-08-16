@@ -30,21 +30,36 @@ from app.integrations.github.repository import (
     get_connection_by_id,
 )
 
+from .analyzer import (
+    AnalyzerConfigurationError,
+    AnalyzerEvidenceError,
+    AnalyzerProviderError,
+    BugAnalysis,
+    BugAnalyzer,
+    InvestigationAnalyzerService,
+)
 from .evidence_storage import (
     EmptyRecordingError,
     EvidenceStorage,
     EvidenceStorageError,
     RecordingTooLargeError,
 )
+from .gemini import GeminiBugAnalyzer
 from .repository import (
+    AnalysisClaimState,
     EvidenceDraft,
+    PersistedAnalysis,
     PersistedInvestigation,
+    claim_analysis,
+    complete_analysis,
     create_evidence_items,
     create_investigation as persist_investigation,
+    get_analysis as load_analysis,
     get_investigation as load_investigation,
     get_recording_evidence,
     list_evidence_items,
     list_investigations as load_investigations,
+    mark_analysis_failed,
 )
 
 logger = structlog.get_logger(__name__)
@@ -96,10 +111,31 @@ class EvidenceListResponse(BaseModel):
     evidence: list[EvidenceResponse]
 
 
+class AnalysisStatusResponse(BaseModel):
+    investigation_id: uuid.UUID
+    status: models.InvestigationStatus
+    analysis: BugAnalysis | None
+
+
 def get_evidence_storage(
     settings: Settings = Depends(get_settings),
 ) -> EvidenceStorage:
     return EvidenceStorage(settings.evidence_storage_dir)
+
+
+def get_bug_analyzer(settings: Settings = Depends(get_settings)) -> BugAnalyzer:
+    return GeminiBugAnalyzer(
+        api_key=settings.gemini_api_key,
+        model_name=settings.gemini_model,
+        processing_timeout_seconds=settings.gemini_file_processing_timeout_seconds,
+    )
+
+
+def get_analyzer_service(
+    analyzer: BugAnalyzer = Depends(get_bug_analyzer),
+    storage: EvidenceStorage = Depends(get_evidence_storage),
+) -> InvestigationAnalyzerService:
+    return InvestigationAnalyzerService(analyzer, storage)
 
 
 @router.post(
@@ -410,6 +446,187 @@ async def get_investigation_evidence_content(
             detail="Evidence storage is temporarily unavailable.",
         ) from None
     return FileResponse(path, media_type=evidence.mime_type or "video/webm")
+
+
+@router.post(
+    "/investigations/{investigation_id}/analyze",
+    response_model=AnalysisStatusResponse,
+)
+async def analyze_investigation(
+    investigation_id: uuid.UUID,
+    request: Request,
+    analyzer_service: InvestigationAnalyzerService = Depends(get_analyzer_service),
+    db: AsyncSession = Depends(get_db),
+) -> AnalysisStatusResponse:
+    connection = await _require_connection(request, db)
+    try:
+        claim = await claim_analysis(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+        )
+        if claim.state == AnalysisClaimState.NOT_FOUND:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail="Investigation not found.")
+        if claim.state == AnalysisClaimState.NO_EVIDENCE:
+            await db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail="Add evidence before analyzing this investigation.",
+            )
+        if claim.state == AnalysisClaimState.CONFLICT:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Investigation analysis is already running or completed.",
+            )
+        await db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "analysis_claim_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Bug analysis is temporarily unavailable.",
+        ) from None
+
+    if claim.investigation is None or claim.evidence is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Bug analysis is temporarily unavailable.",
+        )
+
+    try:
+        analysis = await analyzer_service.analyze(
+            claim.investigation,
+            claim.evidence,
+        )
+    except AnalyzerConfigurationError as exc:
+        await _best_effort_mark_analysis_failed(db, investigation_id)
+        logger.warning(
+            "analysis_configuration_missing",
+            investigation_id=str(investigation_id),
+            exception_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Bug analysis is not configured.",
+        ) from None
+    except AnalyzerEvidenceError as exc:
+        await _best_effort_mark_analysis_failed(db, investigation_id)
+        logger.warning(
+            "analysis_evidence_unavailable",
+            investigation_id=str(investigation_id),
+            exception_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Investigation evidence is temporarily unavailable.",
+        ) from None
+    except AnalyzerProviderError as exc:
+        await _best_effort_mark_analysis_failed(db, investigation_id)
+        logger.warning(
+            "analysis_provider_failed",
+            investigation_id=str(investigation_id),
+            exception_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Bug analysis failed. Please try again.",
+        ) from None
+
+    try:
+        persisted = await complete_analysis(
+            db,
+            investigation_id=investigation_id,
+            model_name=analyzer_service.model_name,
+            analysis=analysis,
+        )
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        await _best_effort_mark_analysis_failed(db, investigation_id)
+        logger.exception(
+            "analysis_persistence_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Bug analysis is temporarily unavailable.",
+        ) from None
+
+    return _analysis_response(
+        investigation_id,
+        models.InvestigationStatus.COMPLETED,
+        persisted,
+    )
+
+
+@router.get(
+    "/investigations/{investigation_id}/analysis",
+    response_model=AnalysisStatusResponse,
+)
+async def get_investigation_analysis(
+    investigation_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> AnalysisStatusResponse:
+    connection = await _require_connection(request, db)
+    try:
+        snapshot = await load_analysis(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+        )
+    except SQLAlchemyError:
+        logger.exception(
+            "analysis_read_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Bug analysis is temporarily unavailable.",
+        ) from None
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Investigation not found.")
+    return _analysis_response(
+        investigation_id,
+        models.InvestigationStatus(snapshot.status),
+        snapshot.analysis,
+    )
+
+
+def _analysis_response(
+    investigation_id: uuid.UUID,
+    investigation_status: models.InvestigationStatus,
+    analysis: PersistedAnalysis | None,
+) -> AnalysisStatusResponse:
+    return AnalysisStatusResponse(
+        investigation_id=investigation_id,
+        status=investigation_status,
+        analysis=BugAnalysis.model_validate(analysis) if analysis is not None else None,
+    )
+
+
+async def _best_effort_mark_analysis_failed(
+    db: AsyncSession, investigation_id: uuid.UUID
+) -> None:
+    try:
+        await mark_analysis_failed(db, investigation_id=investigation_id)
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "analysis_failure_status_update_failed",
+            investigation_id=str(investigation_id),
+        )
 
 
 async def _require_investigation(

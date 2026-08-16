@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     evidence_storage_dir: Path = Path(".data/evidence")
     max_evidence_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
 
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.6-flash"
+    gemini_file_processing_timeout_seconds: float = Field(default=300, gt=0)
+
     session_secret: str
     session_cookie_secure: bool = False
 

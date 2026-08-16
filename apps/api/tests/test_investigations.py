@@ -19,14 +19,19 @@ from app.integrations.github.repository import (
     PersistedGitHubConnection,
     persist_github_connection,
 )
+from app.investigations.analyzer import BugAnalysis
 from app.investigations.repository import (
+    AnalysisClaimState,
     EvidenceDraft,
     PersistedInvestigation,
+    claim_analysis,
+    complete_analysis,
     create_evidence_items,
     create_investigation,
     get_investigation,
     list_evidence_items,
     list_investigations,
+    mark_analysis_failed,
 )
 from app.projects.repository import create_project
 
@@ -433,6 +438,62 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 )
                 await db.commit()
 
+                claim = await claim_analysis(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert claim.state == AnalysisClaimState.READY
+                assert claim.investigation is not None
+                assert claim.investigation.status == "running"
+                await db.commit()
+                await mark_analysis_failed(
+                    db, investigation_id=first_investigation.id
+                )
+                await db.commit()
+                failed = await get_investigation(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert failed is not None
+                assert failed.status == "failed"
+
+                retry_claim = await claim_analysis(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert retry_claim.state == AnalysisClaimState.READY
+                assert retry_claim.investigation is not None
+                assert retry_claim.investigation.status == "running"
+                await db.commit()
+                persisted_analysis = await complete_analysis(
+                    db,
+                    investigation_id=first_investigation.id,
+                    model_name="gemini-test-model",
+                    analysis=BugAnalysis(
+                        summary="Checkout is unresponsive",
+                        observed_behavior="Clicking Checkout has no visible effect.",
+                        expected_behavior="Checkout should open.",
+                        reproduction_steps=["Click Checkout."],
+                        error_signals=[],
+                        suspected_components=["checkout UI"],
+                        confidence="high",
+                        needs_more_information=False,
+                        missing_information=[],
+                    ),
+                )
+                await db.commit()
+                assert persisted_analysis.investigation_id == first_investigation.id
+                completed = await get_investigation(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert completed is not None
+                assert completed.status == "completed"
+
                 visible = await list_investigations(
                     db, installation_id=first_connection.installation_id
                 )
@@ -468,6 +529,14 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                     )
                 ).scalar_one_or_none()
                 assert deleted_evidence is None
+                deleted_analysis = (
+                    await db.execute(
+                        select(models.InvestigationAnalysis).where(
+                            models.InvestigationAnalysis.id == persisted_analysis.id
+                        )
+                    )
+                ).scalar_one_or_none()
+                assert deleted_analysis is None
         finally:
             async with SessionLocal() as db:
                 await db.execute(

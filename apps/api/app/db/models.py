@@ -15,11 +15,13 @@ from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, CreatedAt, UpdatedAt, UUIDPrimaryKey
@@ -179,6 +181,12 @@ class Investigation(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    analysis: Mapped["InvestigationAnalysis | None"] = relationship(
+        back_populates="investigation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
 
 
 class EvidenceKind(StrEnum):
@@ -213,3 +221,44 @@ class InvestigationEvidence(Base):
     investigation: Mapped["Investigation"] = relationship(
         back_populates="evidence_items"
     )
+
+
+class AnalysisConfidence(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class InvestigationAnalysis(Base):
+    """Current structured Gemini understanding of an Investigation."""
+
+    __tablename__ = "investigation_analyses"
+    __table_args__ = (
+        CheckConstraint(
+            "confidence IN ('low', 'medium', 'high')",
+            name="ck_investigation_analyses_confidence",
+        ),
+        UniqueConstraint(
+            "investigation_id",
+            name="uq_investigation_analyses_investigation_id",
+        ),
+    )
+
+    id: Mapped[UUIDPrimaryKey]
+    investigation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("investigations.id", ondelete="CASCADE")
+    )
+    model_name: Mapped[str]
+    summary: Mapped[str] = mapped_column(Text)
+    observed_behavior: Mapped[str] = mapped_column(Text)
+    expected_behavior: Mapped[str | None] = mapped_column(Text)
+    reproduction_steps: Mapped[list[str]] = mapped_column(JSONB)
+    error_signals: Mapped[list[str]] = mapped_column(JSONB)
+    suspected_components: Mapped[list[str]] = mapped_column(JSONB)
+    confidence: Mapped[str]
+    needs_more_information: Mapped[bool] = mapped_column(Boolean)
+    missing_information: Mapped[list[str]] = mapped_column(JSONB)
+    created_at: Mapped[CreatedAt]
+    updated_at: Mapped[UpdatedAt]
+
+    investigation: Mapped["Investigation"] = relationship(back_populates="analysis")

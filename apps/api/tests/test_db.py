@@ -3,7 +3,8 @@ import uuid
 from pathlib import Path
 
 import pytest
-from sqlalchemy import BigInteger, CheckConstraint, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.config import get_settings
@@ -32,6 +33,7 @@ def test_expected_tables_are_registered_on_the_metadata():
         "projects",
         "investigations",
         "investigation_evidence",
+        "investigation_analyses",
     }
 
 
@@ -203,6 +205,61 @@ def test_investigation_evidence_metadata_and_constraints():
     assert "ix_investigation_evidence_investigation_id" in indexes
 
 
+def test_investigation_analysis_metadata_and_one_per_investigation():
+    table = Base.metadata.tables["investigation_analyses"]
+
+    assert list(table.primary_key.columns.keys()) == ["id"]
+    assert not table.c.investigation_id.nullable
+    assert not table.c.model_name.nullable
+    assert isinstance(table.c.summary.type, Text)
+    assert isinstance(table.c.observed_behavior.type, Text)
+    assert isinstance(table.c.expected_behavior.type, Text)
+    assert table.c.expected_behavior.nullable
+    for column_name in (
+        "reproduction_steps",
+        "error_signals",
+        "suspected_components",
+        "missing_information",
+    ):
+        assert isinstance(table.c[column_name].type, JSONB)
+        assert not table.c[column_name].nullable
+    assert isinstance(table.c.needs_more_information.type, Boolean)
+    assert not table.c.needs_more_information.nullable
+
+    investigation_fks = list(table.c.investigation_id.foreign_keys)
+    assert len(investigation_fks) == 1
+    assert investigation_fks[0].target_fullname == "investigations.id"
+    assert investigation_fks[0].ondelete == "CASCADE"
+
+    unique = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    ]
+    assert len(unique) == 1
+    assert unique[0].name == "uq_investigation_analyses_investigation_id"
+    assert [column.name for column in unique[0].columns] == ["investigation_id"]
+
+    confidence = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    ]
+    assert len(confidence) == 1
+    assert confidence[0].name == "ck_investigation_analyses_confidence"
+    for value in ("low", "medium", "high"):
+        assert value in str(confidence[0].sqltext)
+
+    assert set(table.c.keys()).isdisjoint(
+        {
+            "gemini_api_key",
+            "gemini_file_name",
+            "gemini_file_uri",
+            "raw_response",
+        }
+    )
+
+
 def test_user_and_installation_relationships_use_passive_deletes():
     # Ensures the ORM relationships defer deletion to the DB-level
     # ON DELETE CASCADE instead of issuing per-row DELETEs themselves.
@@ -226,6 +283,11 @@ def test_user_and_installation_relationships_use_passive_deletes():
     assert evidence_rel.passive_deletes is True
     assert evidence_rel.cascade.delete_orphan
 
+    analysis_rel = models.Investigation.analysis.property
+    assert analysis_rel.passive_deletes is True
+    assert analysis_rel.cascade.delete_orphan
+    assert analysis_rel.uselist is False
+
 
 def test_primary_keys_default_to_application_generated_uuids():
     for table_name in (
@@ -235,6 +297,7 @@ def test_primary_keys_default_to_application_generated_uuids():
         "projects",
         "investigations",
         "investigation_evidence",
+        "investigation_analyses",
     ):
         id_default = Base.metadata.tables[table_name].c.id.default
         assert id_default.is_callable
@@ -289,6 +352,7 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     assert "a8c9d4e1f2b3" in revisions  # add installation-owned projects
     assert "b4f1c2d3e4a5" in revisions  # add Project-owned investigations
     assert "c5a6b7d8e9f0" in revisions  # add Investigation-owned evidence
+    assert "d6b7c8e9f0a1" in revisions  # add current structured analysis
 
 
 def test_projects_migration_is_linear_and_supports_clean_downgrade():
@@ -341,6 +405,24 @@ def test_evidence_migration_is_linear_and_supports_clean_downgrade():
     assert 'name="ck_investigation_evidence_kind"' in migration_source
     assert 'ondelete="CASCADE"' in migration_source
     assert 'op.drop_table("investigation_evidence")' in migration_source
+
+
+def test_analysis_migration_is_linear_and_supports_clean_downgrade():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("d6b7c8e9f0a1")
+    migration_source = Path(revision.path).read_text()
+
+    assert revision.down_revision == "c5a6b7d8e9f0"
+    assert 'op.create_table(\n        "investigation_analyses"' in migration_source
+    assert 'postgresql.JSONB()' in migration_source
+    assert 'name="uq_investigation_analyses_investigation_id"' in migration_source
+    assert 'name="ck_investigation_analyses_confidence"' in migration_source
+    assert 'ondelete="CASCADE"' in migration_source
+    assert 'op.drop_table("investigation_analyses")' in migration_source
 
 
 def test_normalization_migration_backfills_before_dropping_legacy_user_id():
