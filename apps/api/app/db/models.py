@@ -283,6 +283,12 @@ class ReproductionStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+class GitHubIssuePublicationStatus(StrEnum):
+    CREATING = "creating"
+    CREATED = "created"
+    FAILED = "failed"
+
+
 class InvestigationAgentRun(Base):
     """One current autonomous repository/browser investigation result."""
 
@@ -296,6 +302,11 @@ class InvestigationAgentRun(Base):
             "reproduction_status IS NULL OR reproduction_status IN "
             "('reproduced', 'not_reproduced', 'blocked')",
             name="ck_investigation_agent_runs_reproduction_status",
+        ),
+        CheckConstraint(
+            "github_issue_status IS NULL OR github_issue_status IN "
+            "('creating', 'created', 'failed')",
+            name="ck_investigation_agent_runs_github_issue_status",
         ),
         UniqueConstraint(
             "investigation_id",
@@ -317,6 +328,12 @@ class InvestigationAgentRun(Base):
     execution_result: Mapped[dict | None] = mapped_column(JSONB)
     execution_summary: Mapped[str | None] = mapped_column(Text)
     execution_error: Mapped[str | None] = mapped_column(Text)
+    github_issue_status: Mapped[str | None]
+    github_issue_number: Mapped[int | None] = mapped_column(BigInteger)
+    github_issue_title: Mapped[str | None]
+    github_issue_url: Mapped[str | None]
+    github_issue_created_at: Mapped[datetime | None]
+    github_issue_publish_started_at: Mapped[datetime | None]
     started_at: Mapped[datetime]
     completed_at: Mapped[datetime | None]
     created_at: Mapped[CreatedAt]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -57,12 +57,52 @@ class PersistedAgentRun:
     execution_summary: str | None
     started_at: datetime
     completed_at: datetime | None
+    github_issue_status: str | None = None
+    github_issue_number: int | None = None
+    github_issue_title: str | None = None
+    github_issue_url: str | None = None
+
+
+@dataclass(frozen=True)
+class PublishedGitHubIssue:
+    number: int
+    title: str
+    url: str
+
+
+class GitHubIssueClaimState(StrEnum):
+    READY = "ready"
+    CREATED = "created"
+    NOT_FOUND = "not_found"
+    NO_COMPLETED_RUN = "no_completed_run"
+    CONFLICT = "conflict"
+
+
+@dataclass(frozen=True)
+class GitHubIssuePublicationContext:
+    investigation_id: uuid.UUID
+    github_installation_id: int
+    repository_full_name: str
+    investigation_title: str
+    investigation_description: str | None
+    analysis: "BugAnalysis"
+    run: PersistedAgentRun
+
+
+@dataclass(frozen=True)
+class GitHubIssueClaim:
+    state: GitHubIssueClaimState
+    context: GitHubIssuePublicationContext | None = None
+    issue: PublishedGitHubIssue | None = None
 
 
 @dataclass(frozen=True)
 class AgentRunSnapshot:
     accessible: bool
     run: PersistedAgentRun | None
+
+
+_PUBLICATION_STALE_AFTER = timedelta(minutes=5)
 
 
 async def claim_agent_run(
@@ -132,6 +172,12 @@ async def claim_agent_run(
             execution_result=None,
             execution_summary=None,
             execution_error=None,
+            github_issue_status=None,
+            github_issue_number=None,
+            github_issue_title=None,
+            github_issue_url=None,
+            github_issue_created_at=None,
+            github_issue_publish_started_at=None,
             started_at=started_at,
             completed_at=None,
         )
@@ -147,6 +193,12 @@ async def claim_agent_run(
         run.execution_result = None
         run.execution_summary = None
         run.execution_error = None
+        run.github_issue_status = None
+        run.github_issue_number = None
+        run.github_issue_title = None
+        run.github_issue_url = None
+        run.github_issue_created_at = None
+        run.github_issue_publish_started_at = None
         run.started_at = started_at
         run.completed_at = None
     await db.flush()
@@ -261,6 +313,143 @@ async def get_agent_run(
     )
 
 
+async def claim_github_issue_publication(
+    db: AsyncSession,
+    *,
+    installation_id: uuid.UUID,
+    investigation_id: uuid.UUID,
+) -> GitHubIssueClaim:
+    """Authorize and claim publication without spanning the GitHub request."""
+    row = (
+        await db.execute(
+            select(
+                models.Investigation,
+                models.Project,
+                models.GitHubInstallation,
+                models.InvestigationAnalysis,
+            )
+            .join(models.Project, models.Investigation.project_id == models.Project.id)
+            .join(
+                models.GitHubInstallation,
+                models.Project.github_installation_id == models.GitHubInstallation.id,
+            )
+            .outerjoin(
+                models.InvestigationAnalysis,
+                models.InvestigationAnalysis.investigation_id
+                == models.Investigation.id,
+            )
+            .where(
+                models.Investigation.id == investigation_id,
+                models.Project.github_installation_id == installation_id,
+            )
+            .with_for_update(of=models.Investigation)
+        )
+    ).first()
+    if row is None:
+        return GitHubIssueClaim(state=GitHubIssueClaimState.NOT_FOUND)
+
+    investigation, project, installation, analysis = row
+    run = (
+        await db.execute(
+            select(models.InvestigationAgentRun)
+            .where(models.InvestigationAgentRun.investigation_id == investigation_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if (
+        run is None
+        or run.status != models.AgentRunStatus.COMPLETED.value
+        or analysis is None
+    ):
+        return GitHubIssueClaim(state=GitHubIssueClaimState.NO_COMPLETED_RUN)
+
+    if (
+        run.github_issue_status
+        == models.GitHubIssuePublicationStatus.CREATED.value
+        and run.github_issue_number is not None
+        and run.github_issue_title is not None
+        and run.github_issue_url is not None
+    ):
+        return GitHubIssueClaim(
+            state=GitHubIssueClaimState.CREATED,
+            issue=PublishedGitHubIssue(
+                number=run.github_issue_number,
+                title=run.github_issue_title,
+                url=run.github_issue_url,
+            ),
+        )
+
+    now = datetime.now(UTC)
+    if (
+        run.github_issue_status
+        == models.GitHubIssuePublicationStatus.CREATING.value
+        and run.github_issue_publish_started_at is not None
+        and run.github_issue_publish_started_at > now - _PUBLICATION_STALE_AFTER
+    ):
+        return GitHubIssueClaim(state=GitHubIssueClaimState.CONFLICT)
+
+    run.github_issue_status = models.GitHubIssuePublicationStatus.CREATING.value
+    run.github_issue_publish_started_at = now
+    await db.flush()
+    persisted = _to_persisted(run)
+    return GitHubIssueClaim(
+        state=GitHubIssueClaimState.READY,
+        context=GitHubIssuePublicationContext(
+            investigation_id=investigation.id,
+            github_installation_id=installation.github_installation_id,
+            repository_full_name=project.github_repository_full_name,
+            investigation_title=investigation.title,
+            investigation_description=investigation.description,
+            analysis=_to_bug_analysis(analysis),
+            run=persisted,
+        ),
+    )
+
+
+async def complete_github_issue_publication(
+    db: AsyncSession,
+    *,
+    investigation_id: uuid.UUID,
+    issue: PublishedGitHubIssue,
+) -> PersistedAgentRun:
+    run = (
+        await db.execute(
+            select(models.InvestigationAgentRun)
+            .where(
+                models.InvestigationAgentRun.investigation_id == investigation_id,
+                models.InvestigationAgentRun.github_issue_status
+                == models.GitHubIssuePublicationStatus.CREATING.value,
+            )
+            .with_for_update()
+        )
+    ).scalar_one()
+    run.github_issue_status = models.GitHubIssuePublicationStatus.CREATED.value
+    run.github_issue_number = issue.number
+    run.github_issue_title = issue.title
+    run.github_issue_url = issue.url
+    run.github_issue_created_at = datetime.now(UTC)
+    await db.flush()
+    return _to_persisted(run)
+
+
+async def mark_github_issue_publication_failed(
+    db: AsyncSession, *, investigation_id: uuid.UUID
+) -> None:
+    run = (
+        await db.execute(
+            select(models.InvestigationAgentRun)
+            .where(
+                models.InvestigationAgentRun.investigation_id == investigation_id,
+                models.InvestigationAgentRun.github_issue_status
+                == models.GitHubIssuePublicationStatus.CREATING.value,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if run is not None:
+        run.github_issue_status = models.GitHubIssuePublicationStatus.FAILED.value
+
+
 def _to_persisted(run: models.InvestigationAgentRun) -> PersistedAgentRun:
     return PersistedAgentRun(
         id=run.id,
@@ -276,6 +465,10 @@ def _to_persisted(run: models.InvestigationAgentRun) -> PersistedAgentRun:
         execution_summary=run.execution_summary,
         started_at=run.started_at,
         completed_at=run.completed_at,
+        github_issue_status=run.github_issue_status,
+        github_issue_number=run.github_issue_number,
+        github_issue_title=run.github_issue_title,
+        github_issue_url=run.github_issue_url,
     )
 
 

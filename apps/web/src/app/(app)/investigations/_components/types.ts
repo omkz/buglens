@@ -92,4 +92,17 @@ export type AgentRunStatus = {
   investigation_id: string;
   status: "running" | "completed" | "failed" | null;
   result: AgentRunResult | null;
+  github_issue_status: "creating" | "created" | "failed" | null;
+  github_issue: GitHubIssue | null;
+};
+
+export type GitHubIssue = {
+  number: number;
+  title: string;
+  url: string;
+};
+
+export type GitHubIssuePublication = {
+  status: "created";
+  issue: GitHubIssue;
 };

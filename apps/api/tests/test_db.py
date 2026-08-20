@@ -453,6 +453,22 @@ def test_agent_run_migration_is_linear_and_supports_clean_downgrade():
     assert 'op.drop_table("investigation_agent_runs")' in migration_source
 
 
+def test_github_issue_publication_migration_is_linear_and_reversible():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("f8d9e0a1b2c3")
+    migration_source = Path(revision.path).read_text()
+
+    assert revision.down_revision == "e7c8d9f0a1b2"
+    assert 'sa.Column("github_issue_status"' in migration_source
+    assert 'sa.Column("github_issue_number", sa.BigInteger()' in migration_source
+    assert '"ck_investigation_agent_runs_github_issue_status"' in migration_source
+    assert 'op.drop_column("investigation_agent_runs", "github_issue_status")' in migration_source
+
+
 def test_agent_run_model_has_one_current_run_and_safe_status_constraints():
     table = Base.metadata.tables["investigation_agent_runs"]
 
@@ -464,6 +480,9 @@ def test_agent_run_model_has_one_current_run_and_safe_status_constraints():
     assert isinstance(table.c.generated_test.type, Text)
     assert table.c.started_at.type.timezone is True
     assert table.c.completed_at.type.timezone is True
+    assert table.c.github_issue_created_at.type.timezone is True
+    assert table.c.github_issue_publish_started_at.type.timezone is True
+    assert isinstance(table.c.github_issue_number.type, BigInteger)
     assert list(table.c.investigation_id.foreign_keys)[0].ondelete == "CASCADE"
 
     unique_names = {
@@ -478,6 +497,7 @@ def test_agent_run_model_has_one_current_run_and_safe_status_constraints():
     }
     assert "uq_investigation_agent_runs_investigation_id" in unique_names
     assert "ck_investigation_agent_runs_status" in check_names
+    assert "ck_investigation_agent_runs_github_issue_status" in check_names
     assert "ck_investigation_agent_runs_reproduction_status" in check_names
 
 

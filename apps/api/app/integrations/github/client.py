@@ -10,7 +10,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 import jwt
@@ -67,6 +67,14 @@ class GitHubIssue:
     html_url: str
     body_excerpt: str
     labels: list[str]
+
+
+@dataclass(frozen=True)
+class GitHubCreatedIssue:
+    number: int
+    title: str
+    html_url: str
+    state: str
 
 
 def build_install_url(*, app_slug: str, state: str) -> str:
@@ -341,6 +349,74 @@ async def search_repository_issues(
     return issues
 
 
+async def find_repository_issue_by_marker(
+    installation_access_token: str,
+    *,
+    owner: str,
+    repository: str,
+    marker: str,
+) -> GitHubCreatedIssue | None:
+    """Inspect a bounded set of recent issues for one exact hidden marker."""
+    issues_url = (
+        f"{GITHUB_API_BASE_URL}/repos/{quote(owner, safe='')}/"
+        f"{quote(repository, safe='')}/issues"
+    )
+    async with _make_http_client() as http_client:
+        response = await http_client.get(
+            issues_url,
+            headers=_auth_headers(installation_access_token),
+            params={
+                "state": "all",
+                "sort": "created",
+                "direction": "desc",
+                "per_page": 20,
+            },
+        )
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise GitHubAPIError("GitHub returned an invalid issue list response.") from exc
+    if not isinstance(payload, list):
+        raise GitHubAPIError("GitHub returned an invalid issue list response.")
+    for item in payload[:20]:
+        if not isinstance(item, dict) or "pull_request" in item:
+            continue
+        body = item.get("body")
+        if isinstance(body, str) and marker in body:
+            return _created_issue_from_payload(
+                item, owner=owner, repository=repository
+            )
+    return None
+
+
+async def create_repository_issue(
+    installation_access_token: str,
+    *,
+    owner: str,
+    repository: str,
+    title: str,
+    body: str,
+) -> GitHubCreatedIssue:
+    """Create one issue in a fixed installation-scoped repository."""
+    issues_url = (
+        f"{GITHUB_API_BASE_URL}/repos/{quote(owner, safe='')}/"
+        f"{quote(repository, safe='')}/issues"
+    )
+    async with _make_http_client() as http_client:
+        response = await http_client.post(
+            issues_url,
+            headers=_auth_headers(installation_access_token),
+            json={"title": title, "body": body},
+        )
+    response.raise_for_status()
+    return _created_issue_from_payload(
+        _json_object(response, "created issue"),
+        owner=owner,
+        repository=repository,
+    )
+
+
 def _make_http_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
 
@@ -361,3 +437,35 @@ def _json_object(response: httpx.Response, resource: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise GitHubAPIError(f"GitHub returned an invalid {resource} response.")
     return payload
+
+
+def _created_issue_from_payload(
+    payload: dict[str, Any], *, owner: str, repository: str
+) -> GitHubCreatedIssue:
+    number = payload.get("number")
+    title = payload.get("title")
+    html_url = payload.get("html_url")
+    state = payload.get("state")
+    if (
+        type(number) is not int
+        or number <= 0
+        or not isinstance(title, str)
+        or not title.strip()
+        or not isinstance(html_url, str)
+        or state not in {"open", "closed"}
+    ):
+        raise GitHubAPIError("GitHub returned an invalid created issue response.")
+    parsed_url = urlsplit(html_url)
+    expected_path_prefix = f"/{owner}/{repository}/issues/"
+    if (
+        parsed_url.scheme != "https"
+        or parsed_url.hostname != "github.com"
+        or not parsed_url.path.startswith(expected_path_prefix)
+    ):
+        raise GitHubAPIError("GitHub returned an invalid created issue response.")
+    return GitHubCreatedIssue(
+        number=number,
+        title=title[:500],
+        html_url=html_url,
+        state=state,
+    )

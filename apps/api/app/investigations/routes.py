@@ -5,7 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from pathlib import PurePath
+from typing import Literal
 
+import httpx
 import structlog
 from fastapi import (
     APIRouter,
@@ -25,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.db import models
 from app.db.session import get_db
+from app.integrations.github import client as github_client
 from app.integrations.github.repository import (
     PersistedGitHubConnection,
     get_connection_by_id,
@@ -34,12 +37,21 @@ from app.investigation_agent.agent import (
     AgentConfigurationError,
     AgentProviderError,
 )
+from app.investigation_agent.github_issue import (
+    GitHubIssuePublisher,
+    build_github_issue,
+)
 from app.investigation_agent.repository import (
     AgentRunClaimState,
+    GitHubIssueClaimState,
     PersistedAgentRun,
+    PublishedGitHubIssue,
     claim_agent_run,
+    claim_github_issue_publication,
+    complete_github_issue_publication,
     complete_agent_run,
     get_agent_run as load_agent_run,
+    mark_github_issue_publication_failed,
     mark_agent_run_failed,
 )
 from app.investigation_agent.schemas import (
@@ -152,10 +164,23 @@ class AgentRunResultResponse(BaseModel):
     execution_summary: str | None
 
 
+class GitHubIssueResponse(BaseModel):
+    number: int
+    title: str
+    url: str
+
+
 class AgentRunStatusResponse(BaseModel):
     investigation_id: uuid.UUID
     status: models.AgentRunStatus | None
     result: AgentRunResultResponse | None
+    github_issue_status: models.GitHubIssuePublicationStatus | None
+    github_issue: GitHubIssueResponse | None
+
+
+class GitHubIssuePublicationResponse(BaseModel):
+    status: Literal["created"]
+    issue: GitHubIssueResponse
 
 
 def get_evidence_storage(
@@ -192,6 +217,12 @@ def get_investigation_agent_service(
         allow_private_network=settings.playwright_allow_private_network,
     )
     return InvestigationAgentService(agent=agent, runner=runner, settings=settings)
+
+
+def get_github_issue_publisher(
+    settings: Settings = Depends(get_settings),
+) -> GitHubIssuePublisher:
+    return GitHubIssuePublisher(settings)
 
 
 @router.post(
@@ -805,6 +836,117 @@ async def get_agent_investigation(
     return _agent_run_response(investigation_id, snapshot.run)
 
 
+@router.post(
+    "/investigations/{investigation_id}/github-issue",
+    response_model=GitHubIssuePublicationResponse,
+)
+async def create_investigation_github_issue(
+    investigation_id: uuid.UUID,
+    request: Request,
+    publisher: GitHubIssuePublisher = Depends(get_github_issue_publisher),
+    db: AsyncSession = Depends(get_db),
+) -> GitHubIssuePublicationResponse:
+    """Publish persisted results only after this explicit user request."""
+    connection = await _require_connection(request, db)
+    try:
+        claim = await claim_github_issue_publication(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+        )
+        if claim.state == GitHubIssueClaimState.NOT_FOUND:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail="Investigation not found.")
+        if claim.state == GitHubIssueClaimState.NO_COMPLETED_RUN:
+            await db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail="Run the investigation before creating a GitHub issue.",
+            )
+        if claim.state == GitHubIssueClaimState.CONFLICT:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="GitHub issue creation is already in progress.",
+            )
+        if claim.state == GitHubIssueClaimState.CREATED:
+            await db.rollback()
+            if claim.issue is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="GitHub issue publication is temporarily unavailable.",
+                )
+            return _github_issue_publication_response(claim.issue)
+        await db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "github_issue_claim_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub issue publication is temporarily unavailable.",
+        ) from None
+
+    if claim.context is None:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub issue publication is temporarily unavailable.",
+        )
+    try:
+        draft = build_github_issue(claim.context)
+        created = await publisher.publish(claim.context, draft)
+    except (github_client.GitHubAPIError, httpx.HTTPError) as exc:
+        await _best_effort_mark_github_issue_failed(db, investigation_id)
+        logger.warning(
+            "github_issue_publish_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+            exception_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="GitHub issue creation failed. Please try again.",
+        ) from None
+
+    issue = PublishedGitHubIssue(
+        number=created.number,
+        title=created.title,
+        url=created.html_url,
+    )
+    try:
+        await complete_github_issue_publication(
+            db,
+            investigation_id=investigation_id,
+            issue=issue,
+        )
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        await _best_effort_mark_github_issue_failed(db, investigation_id)
+        logger.exception(
+            "github_issue_persistence_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+            issue_number=issue.number,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub issue publication is temporarily unavailable.",
+        ) from None
+    logger.info(
+        "github_issue_created",
+        investigation_id=str(investigation_id),
+        installation_id=connection.github_installation_id,
+        issue_number=issue.number,
+    )
+    return _github_issue_publication_response(issue)
+
+
 def _agent_run_response(
     investigation_id: uuid.UUID,
     run: PersistedAgentRun | None,
@@ -814,6 +956,8 @@ def _agent_run_response(
             investigation_id=investigation_id,
             status=None,
             result=None,
+            github_issue_status=None,
+            github_issue=None,
         )
     result = None
     if run.status == models.AgentRunStatus.COMPLETED.value:
@@ -848,6 +992,37 @@ def _agent_run_response(
         investigation_id=investigation_id,
         status=models.AgentRunStatus(run.status),
         result=result,
+        github_issue_status=(
+            models.GitHubIssuePublicationStatus(run.github_issue_status)
+            if run.github_issue_status is not None
+            else None
+        ),
+        github_issue=(
+            GitHubIssueResponse(
+                number=run.github_issue_number,
+                title=run.github_issue_title,
+                url=run.github_issue_url,
+            )
+            if run.github_issue_status
+            == models.GitHubIssuePublicationStatus.CREATED.value
+            and run.github_issue_number is not None
+            and run.github_issue_title is not None
+            and run.github_issue_url is not None
+            else None
+        ),
+    )
+
+
+def _github_issue_publication_response(
+    issue: PublishedGitHubIssue,
+) -> GitHubIssuePublicationResponse:
+    return GitHubIssuePublicationResponse(
+        status="created",
+        issue=GitHubIssueResponse(
+            number=issue.number,
+            title=issue.title,
+            url=issue.url,
+        ),
     )
 
 
@@ -887,6 +1062,22 @@ async def _best_effort_mark_agent_run_failed(
         await db.rollback()
         logger.exception(
             "agent_run_failure_status_update_failed",
+            investigation_id=str(investigation_id),
+        )
+
+
+async def _best_effort_mark_github_issue_failed(
+    db: AsyncSession, investigation_id: uuid.UUID
+) -> None:
+    try:
+        await mark_github_issue_publication_failed(
+            db, investigation_id=investigation_id
+        )
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "github_issue_failure_status_update_failed",
             investigation_id=str(investigation_id),
         )
 

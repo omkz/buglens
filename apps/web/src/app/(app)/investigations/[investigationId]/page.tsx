@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { API_BASE_URL } from "@/lib/config";
 import { EvidenceRecorder } from "../_components/evidence-recorder";
 import type {
@@ -11,6 +11,8 @@ import type {
   AnalysisStatus,
   BrowserAction,
   BugAnalysis,
+  GitHubIssue,
+  GitHubIssuePublication,
   Investigation,
   InvestigationEvidence,
 } from "../_components/types";
@@ -68,6 +70,9 @@ export default function InvestigationDetailPage() {
   const [investigationError, setInvestigationError] = useState<string | null>(
     null,
   );
+  const [isCreatingIssue, setIsCreatingIssue] = useState(false);
+  const [issueError, setIssueError] = useState<string | null>(null);
+  const issueRequestActiveRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -302,6 +307,77 @@ export default function InvestigationDetailPage() {
     }
   }
 
+  async function createGitHubIssue() {
+    if (
+      state.status !== "ready" ||
+      state.agentRun.status !== "completed" ||
+      state.agentRun.github_issue_status === "created" ||
+      issueRequestActiveRef.current
+    ) {
+      return;
+    }
+    issueRequestActiveRef.current = true;
+    setIsCreatingIssue(true);
+    setIssueError(null);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/investigations/${encodeURIComponent(investigationId)}/github-issue`,
+        { method: "POST", credentials: "include" },
+      );
+      const body = (await response.json().catch(() => null)) as
+        | GitHubIssuePublication
+        | { detail?: string }
+        | null;
+      if (!response.ok || !body || !("issue" in body)) {
+        throw new Error(
+          body && "detail" in body && body.detail
+            ? body.detail
+            : "GitHub issue creation failed. Please try again.",
+        );
+      }
+      setState((current) =>
+        current.status === "ready"
+          ? {
+              ...current,
+              agentRun: {
+                ...current.agentRun,
+                github_issue_status: "created",
+                github_issue: body.issue,
+              },
+            }
+          : current,
+      );
+    } catch (error) {
+      setIssueError(
+        error instanceof Error
+          ? error.message
+          : "GitHub issue creation failed. Please try again.",
+      );
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/investigations/${encodeURIComponent(investigationId)}/agent-run`,
+          { credentials: "include" },
+        );
+        const body = (await response.json().catch(() => null)) as
+          | AgentRunStatus
+          | null;
+        if (response.ok && body) {
+          if (body.github_issue_status === "created") setIssueError(null);
+          setState((current) =>
+            current.status === "ready"
+              ? { ...current, agentRun: body }
+              : current,
+          );
+        }
+      } catch {
+        // A refresh reloads the persisted publication state.
+      }
+    } finally {
+      issueRequestActiveRef.current = false;
+      setIsCreatingIssue(false);
+    }
+  }
+
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-6 py-16">
       <Link
@@ -515,7 +591,14 @@ export default function InvestigationDetailPage() {
               )}
 
               {state.agentRun.result && (
-                <AgentRunResultView result={state.agentRun.result} />
+                <AgentRunResultView
+                  result={state.agentRun.result}
+                  githubIssueStatus={state.agentRun.github_issue_status}
+                  githubIssue={state.agentRun.github_issue}
+                  isCreatingIssue={isCreatingIssue}
+                  issueError={issueError}
+                  onCreateIssue={createGitHubIssue}
+                />
               )}
             </section>
           )}
@@ -525,7 +608,21 @@ export default function InvestigationDetailPage() {
   );
 }
 
-function AgentRunResultView({ result }: { result: AgentRunResult }) {
+function AgentRunResultView({
+  result,
+  githubIssueStatus,
+  githubIssue,
+  isCreatingIssue,
+  issueError,
+  onCreateIssue,
+}: {
+  result: AgentRunResult;
+  githubIssueStatus: "creating" | "created" | "failed" | null;
+  githubIssue: GitHubIssue | null;
+  isCreatingIssue: boolean;
+  issueError: string | null;
+  onCreateIssue: () => void;
+}) {
   const reproductionLabel = result.reproduction_status
     ? {
         reproduced: "Reproduced",
@@ -564,6 +661,45 @@ function AgentRunResultView({ result }: { result: AgentRunResult }) {
           </li>
         ))}
       </ResultList>
+
+      <div className="flex flex-col items-start gap-3 border-t border-zinc-800 pt-6">
+        {githubIssueStatus === "created" && githubIssue ? (
+          <div className="flex flex-col gap-2">
+            <p className="text-sm font-medium text-emerald-300">
+              GitHub issue created
+            </p>
+            <p className="text-sm text-zinc-300">
+              #{githubIssue.number} {githubIssue.title}
+            </p>
+            <a
+              href={githubIssue.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm text-zinc-200 underline decoration-zinc-700 underline-offset-4 hover:decoration-zinc-300"
+            >
+              Open on GitHub
+            </a>
+          </div>
+        ) : githubIssueStatus === "creating" || isCreatingIssue ? (
+          <p className="text-sm text-zinc-300">Creating GitHub issue…</p>
+        ) : (
+          <button
+            type="button"
+            disabled={isCreatingIssue}
+            onClick={onCreateIssue}
+            className="rounded-full bg-zinc-50 px-4 py-2 text-sm font-medium text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {githubIssueStatus === "failed"
+              ? "Retry GitHub Issue"
+              : "Create GitHub Issue"}
+          </button>
+        )}
+        {issueError && (
+          <p className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-400">
+            {issueError}
+          </p>
+        )}
+      </div>
 
       {result.reproduction_plan && (
         <div className="flex flex-col gap-3">

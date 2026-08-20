@@ -21,9 +21,14 @@ from app.integrations.github.repository import (
 )
 from app.investigation_agent.repository import (
     AgentRunClaimState,
+    GitHubIssueClaimState,
+    PublishedGitHubIssue,
     claim_agent_run,
+    claim_github_issue_publication,
+    complete_github_issue_publication,
     complete_agent_run,
     get_agent_run,
+    mark_github_issue_publication_failed,
     mark_agent_run_failed,
 )
 from app.investigation_agent.schemas import AgentInvestigationResult
@@ -502,6 +507,17 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert completed is not None
                 assert completed.status == "completed"
 
+                no_run_publication = await claim_github_issue_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert (
+                    no_run_publication.state
+                    == GitHubIssueClaimState.NO_COMPLETED_RUN
+                )
+                await db.rollback()
+
                 inaccessible_run = await claim_agent_run(
                     db,
                     installation_id=second_connection.installation_id,
@@ -530,10 +546,31 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert concurrent_claim.state == AgentRunClaimState.CONFLICT
                 await db.rollback()
 
+                running_publication = await claim_github_issue_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert (
+                    running_publication.state
+                    == GitHubIssueClaimState.NO_COMPLETED_RUN
+                )
+                await db.rollback()
+
                 await mark_agent_run_failed(
                     db, investigation_id=first_investigation.id
                 )
                 await db.commit()
+                failed_run_publication = await claim_github_issue_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert (
+                    failed_run_publication.state
+                    == GitHubIssueClaimState.NO_COMPLETED_RUN
+                )
+                await db.rollback()
                 retry_run = await claim_agent_run(
                     db,
                     installation_id=first_connection.installation_id,
@@ -564,6 +601,77 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert run_snapshot.accessible is True
                 assert run_snapshot.run is not None
                 assert run_snapshot.run.id == persisted_run.id
+
+                inaccessible_publication = await claim_github_issue_publication(
+                    db,
+                    installation_id=second_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert inaccessible_publication.state == GitHubIssueClaimState.NOT_FOUND
+
+                publication_claim = await claim_github_issue_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert publication_claim.state == GitHubIssueClaimState.READY
+                assert publication_claim.context is not None
+                assert (
+                    publication_claim.context.repository_full_name
+                    == "first-org/first-repo"
+                )
+                await db.commit()
+
+                concurrent_publication = await claim_github_issue_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert concurrent_publication.state == GitHubIssueClaimState.CONFLICT
+                await db.rollback()
+
+                await mark_github_issue_publication_failed(
+                    db, investigation_id=first_investigation.id
+                )
+                await db.commit()
+                retry_publication = await claim_github_issue_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert retry_publication.state == GitHubIssueClaimState.READY
+                await db.commit()
+
+                published_issue = PublishedGitHubIssue(
+                    number=123,
+                    title="Checkout is unresponsive",
+                    url="https://github.com/first-org/first-repo/issues/123",
+                )
+                published_run = await complete_github_issue_publication(
+                    db,
+                    investigation_id=first_investigation.id,
+                    issue=published_issue,
+                )
+                await db.commit()
+                assert published_run.github_issue_status == "created"
+                assert published_run.github_issue_number == 123
+
+                existing_publication = await claim_github_issue_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert existing_publication.state == GitHubIssueClaimState.CREATED
+                assert existing_publication.issue == published_issue
+                await db.rollback()
+
+                refreshed_run = await get_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert refreshed_run.run is not None
+                assert refreshed_run.run.github_issue_url == published_issue.url
 
                 visible = await list_investigations(
                     db, installation_id=first_connection.installation_id
