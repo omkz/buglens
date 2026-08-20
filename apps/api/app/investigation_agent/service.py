@@ -91,10 +91,14 @@ class InvestigationAgentService:
                 "Agent returned a browser plan without an application URL."
             )
         try:
-            validated_app_origin(context.app_url)
+            validated_app_origin(
+                context.app_url,
+                allow_private_network=self.settings.playwright_allow_private_network,
+            )
             generated_test = render_playwright_source(
                 result.reproduction_plan,
                 app_url=context.app_url,
+                allow_private_network=self.settings.playwright_allow_private_network,
             )
         except UnsafeApplicationUrlError as exc:
             raise InvestigationResultError("Application URL is not safe.") from exc

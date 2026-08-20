@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from base64 import b64encode
@@ -40,8 +41,10 @@ from app.investigation_agent.service import InvestigationGitHubError, _validate_
 from app.investigation_agent.tools.github import GitHubToolContext
 from app.investigation_agent.tools.playwright import (
     PlaywrightPlanRunner,
-    _guard_navigation,
+    _block_web_socket,
+    _guard_request,
     render_playwright_source,
+    validate_public_application_origin,
     validated_app_origin,
 )
 from app.investigations.analyzer import BugAnalysis
@@ -192,7 +195,7 @@ def test_url_safety_and_renderer_are_origin_locked_and_deterministic():
     compile(first, "generated_test.py", "exec")
     assert 'BASE_URL = "https://demo.example.com"' in first
     assert 'page.locator("text=Checkout").click()' in first
-    assert '_guard_navigation' in first
+    assert '_guard_request' in first
     assert "exec(" not in first
     assert "eval(" not in first
     with pytest.raises(ValueError):
@@ -206,11 +209,130 @@ def test_url_safety_and_renderer_are_origin_locked_and_deterministic():
         )
 
 
+@pytest.mark.parametrize(
+    "app_url",
+    [
+        "http://127.0.0.1",
+        "http://127.0.0.1:3000",
+        "http://[::1]",
+        "http://10.0.0.1",
+        "http://172.16.0.1",
+        "http://192.168.1.1",
+        "http://169.254.169.254",
+        "http://[fc00::1]",
+        "http://[fe80::1]",
+        "http://metadata.google.internal",
+        "file:///tmp/app.html",
+        "javascript:alert(1)",
+    ],
+)
+def test_origin_validation_rejects_internal_addresses_and_unsafe_schemes(app_url):
+    with pytest.raises(ValueError):
+        validated_app_origin(app_url)
+
+
+def test_origin_validation_allows_public_origins_and_explicit_development_override():
+    assert (
+        validated_app_origin("https://example.com/path") == "https://example.com"
+    )
+    assert (
+        validated_app_origin(
+            "http://127.0.0.1:3000/path", allow_private_network=True
+        )
+        == "http://127.0.0.1:3000"
+    )
+    assert (
+        validated_app_origin(
+            "http://10.0.0.8/app", allow_private_network=True
+        )
+        == "http://10.0.0.8"
+    )
+    for app_url in (
+        "file:///tmp/app.html",
+        "javascript:alert(1)",
+        "https://user:secret@example.com",
+        "https://example.com:99999",
+    ):
+        with pytest.raises(ValueError):
+            validated_app_origin(app_url, allow_private_network=True)
+
+
 @pytest.mark.anyio
-async def test_navigation_guard_aborts_every_origin_change():
+@pytest.mark.parametrize(
+    ("resolved", "allowed"),
+    [
+        (["93.184.216.34"], True),
+        (["127.0.0.1"], False),
+        (["10.0.0.8"], False),
+        (["93.184.216.34", "10.0.0.8"], False),
+    ],
+)
+async def test_runtime_origin_validation_checks_every_resolved_address(
+    resolved, allowed
+):
+    async def resolver(hostname, port):
+        assert hostname == "example.com"
+        assert port == 443
+        return resolved
+
+    if allowed:
+        assert (
+            await validate_public_application_origin(
+                "https://example.com/path", resolver=resolver
+            )
+            == "https://example.com"
+        )
+    else:
+        with pytest.raises(ValueError):
+            await validate_public_application_origin(
+                "https://example.com/path", resolver=resolver
+            )
+
+
+@pytest.mark.anyio
+async def test_runtime_origin_validation_fails_closed_on_dns_failure():
+    async def resolver(hostname, port):
+        raise OSError("DNS failed")
+
+    with pytest.raises(ValueError, match="could not be safely resolved"):
+        await validate_public_application_origin(
+            "https://example.com", resolver=resolver, dns_timeout_seconds=0.01
+        )
+
+
+@pytest.mark.anyio
+async def test_runtime_origin_validation_fails_closed_on_dns_timeout():
+    async def resolver(hostname, port):
+        await asyncio.Event().wait()
+        return []
+
+    with pytest.raises(ValueError, match="could not be safely resolved"):
+        await validate_public_application_origin(
+            "https://example.com", resolver=resolver, dns_timeout_seconds=0.001
+        )
+
+
+@pytest.mark.anyio
+async def test_runtime_origin_validation_allows_private_dns_only_with_override():
+    async def resolver(hostname, port):
+        return ["127.0.0.1"]
+
+    assert (
+        await validate_public_application_origin(
+            "http://localhost:3000",
+            resolver=resolver,
+            allow_private_network=True,
+        )
+        == "http://localhost:3000"
+    )
+
+
+@pytest.mark.anyio
+async def test_request_guard_allows_only_the_exact_http_origin():
     class Route:
-        aborted = False
-        continued = False
+        def __init__(self):
+            self.aborted = False
+            self.continued = False
 
         async def abort(self, reason):
             self.aborted = reason == "blockedbyclient"
@@ -218,28 +340,68 @@ async def test_navigation_guard_aborts_every_origin_change():
         async def continue_(self):
             self.continued = True
 
-    external = Route()
-    await _guard_navigation(
-        external,
-        SimpleNamespace(
-            url="https://evil.example/redirect",
-            is_navigation_request=lambda: True,
-        ),
+    same_origin = Route()
+    await _guard_request(
+        same_origin,
+        SimpleNamespace(url="https://demo.example.com/assets/app.js"),
         origin="https://demo.example.com",
     )
-    assert external.aborted is True
-    assert external.continued is False
+    assert same_origin.continued is True
+    assert same_origin.aborted is False
 
-    asset = Route()
-    await _guard_navigation(
-        asset,
-        SimpleNamespace(
-            url="https://cdn.example/style.css",
-            is_navigation_request=lambda: False,
-        ),
+    same_effective_origin = Route()
+    await _guard_request(
+        same_effective_origin,
+        SimpleNamespace(url="https://demo.example.com:443/assets/app.js"),
         origin="https://demo.example.com",
     )
-    assert asset.continued is True
+    assert same_effective_origin.continued is True
+
+    blocked_requests = [
+        ("https://evil.example/redirect", "document", True),
+        ("http://demo.example.com/downgrade", "document", True),
+        ("https://demo.example.com:444/other-port", "document", True),
+        ("https://cdn.example/fetch", "fetch", False),
+        ("https://cdn.example/xhr", "xhr", False),
+        ("https://cdn.example/image.png", "image", False),
+        ("https://cdn.example/script.js", "script", False),
+        ("https://cdn.example/style.css", "stylesheet", False),
+        ("https://cdn.example/frame.html", "document", True),
+        ("file:///etc/passwd", "document", True),
+        ("ftp://example.com/file", "document", True),
+        ("ws://demo.example.com/socket", "websocket", False),
+        ("wss://demo.example.com/socket", "websocket", False),
+        ("data:text/plain,hello", "document", True),
+        ("javascript:alert(1)", "document", True),
+        ("blob:https://demo.example.com/id", "document", True),
+        ("about:blank", "document", True),
+    ]
+    for url, resource_type, is_navigation in blocked_requests:
+        route = Route()
+        await _guard_request(
+            route,
+            SimpleNamespace(
+                url=url,
+                resource_type=resource_type,
+                is_navigation_request=lambda: is_navigation,
+            ),
+            origin="https://demo.example.com",
+        )
+        assert route.aborted is True, url
+        assert route.continued is False, url
+
+
+@pytest.mark.anyio
+async def test_web_socket_guard_closes_connection_without_connecting():
+    class WebSocket:
+        closed = False
+
+        async def close(self):
+            self.closed = True
+
+    web_socket = WebSocket()
+    await _block_web_socket(web_socket)
+    assert web_socket.closed is True
 
 
 @pytest.mark.anyio
@@ -416,6 +578,9 @@ class _FakeBrowser:
     async def route(self, pattern, handler):
         self.route_handler = handler
 
+    async def route_web_socket(self, pattern, handler):
+        self.web_socket_handler = handler
+
     async def new_page(self):
         return self.page
 
@@ -447,13 +612,42 @@ async def test_runner_reports_not_reproduced_reproduced_and_blocked():
             "actions": [{"type": "click", "selector": "button"}],
         }
     )
+
+    async def public_resolver(hostname, port):
+        return ["93.184.216.34"]
+
     runner = PlaywrightPlanRunner(
         action_timeout_ms=100,
         run_timeout_seconds=1,
         playwright_factory=_FakePlaywrightContext,
+        resolver=public_resolver,
     )
     passed = await runner.run(plan, app_url="https://demo.example.com")
     assert passed.status == "not_reproduced"
+
+    async def private_resolver(hostname, port):
+        return ["10.0.0.8"]
+
+    private_dns_runner = PlaywrightPlanRunner(
+        action_timeout_ms=100,
+        run_timeout_seconds=1,
+        playwright_factory=_FakePlaywrightContext,
+        resolver=private_resolver,
+    )
+    assert (
+        await private_dns_runner.run(plan, app_url="https://example.com")
+    ).status == "blocked"
+
+    development_runner = PlaywrightPlanRunner(
+        action_timeout_ms=100,
+        run_timeout_seconds=1,
+        allow_private_network=True,
+        playwright_factory=_FakePlaywrightContext,
+        resolver=private_resolver,
+    )
+    assert (
+        await development_runner.run(plan, app_url="http://127.0.0.1:3000")
+    ).status == "not_reproduced"
 
     expectation_plan = BrowserTestPlan.model_validate(
         {

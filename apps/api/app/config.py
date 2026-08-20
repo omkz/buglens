@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     playwright_action_timeout_ms: int = Field(default=10_000, gt=0, le=120_000)
     playwright_run_timeout_seconds: float = Field(default=60, gt=0, le=600)
+    playwright_allow_private_network: bool = False
 
     session_secret: str
     session_cookie_secure: bool = False

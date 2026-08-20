@@ -189,6 +189,7 @@ def get_investigation_agent_service(
     runner = PlaywrightPlanRunner(
         action_timeout_ms=settings.playwright_action_timeout_ms,
         run_timeout_seconds=settings.playwright_run_timeout_seconds,
+        allow_private_network=settings.playwright_allow_private_network,
     )
     return InvestigationAgentService(agent=agent, runner=runner, settings=settings)
 

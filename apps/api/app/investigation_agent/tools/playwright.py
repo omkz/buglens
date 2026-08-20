@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
-from collections.abc import Callable
+import socket
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -30,8 +31,10 @@ class UnsafeApplicationUrlError(ValueError):
     """Raised when a persisted application URL is not safe for navigation."""
 
 
-def validated_app_origin(app_url: str) -> str:
-    """Return the fixed HTTP(S) origin, rejecting credential and metadata URLs."""
+def validated_app_origin(
+    app_url: str, *, allow_private_network: bool = False
+) -> str:
+    """Normalize an HTTP(S) origin and reject unsafe literal addresses."""
     parsed = urlsplit(app_url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname or not parsed.netloc:
         raise UnsafeApplicationUrlError("Application URL must be HTTP or HTTPS.")
@@ -44,18 +47,20 @@ def validated_app_origin(app_url: str) -> str:
         address = ipaddress.ip_address(hostname)
     except ValueError:
         address = None
-    if address is not None and (
-        address.is_link_local
-        or address.is_multicast
-        or address.is_unspecified
-        or address.is_reserved
+    if (
+        address is not None
+        and not allow_private_network
+        and _is_non_public_address(address)
     ):
         raise UnsafeApplicationUrlError("Application URL host is not allowed.")
     try:
         port = parsed.port
     except ValueError as exc:
         raise UnsafeApplicationUrlError("Application URL port is invalid.") from exc
-    normalized_host = hostname.encode("idna").decode("ascii")
+    try:
+        normalized_host = hostname.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise UnsafeApplicationUrlError("Application URL host is invalid.") from exc
     if ":" in normalized_host:
         normalized_host = f"[{normalized_host}]"
     default_port = (parsed.scheme == "http" and port == 80) or (
@@ -65,9 +70,89 @@ def validated_app_origin(app_url: str) -> str:
     return urlunsplit((parsed.scheme.lower(), netloc, "", "", ""))
 
 
-def render_playwright_source(plan: BrowserTestPlan, *, app_url: str) -> str:
+AddressResolver = Callable[[str, int], Awaitable[Sequence[str]]]
+
+
+async def _resolve_hostname(hostname: str, port: int) -> Sequence[str]:
+    results = await asyncio.to_thread(
+        socket.getaddrinfo,
+        hostname,
+        port,
+        type=socket.SOCK_STREAM,
+    )
+    return tuple(result[4][0] for result in results)
+
+
+async def validate_public_application_origin(
+    app_url: str,
+    *,
+    allow_private_network: bool = False,
+    resolver: AddressResolver = _resolve_hostname,
+    dns_timeout_seconds: float = 5.0,
+) -> str:
+    """Validate syntax, then fail closed unless every resolved address is allowed.
+
+    Resolution happens immediately before browser launch. The request guard also
+    locks Chromium to the exact hostname/origin, but it cannot pin Chromium's DNS
+    result without introducing a browser-level proxy or network sandbox.
+    """
+    origin = validated_app_origin(
+        app_url, allow_private_network=allow_private_network
+    )
+    parsed = urlsplit(origin)
+    hostname = parsed.hostname
+    if hostname is None:
+        raise UnsafeApplicationUrlError("Application URL host is invalid.")
+
+    try:
+        literal_address = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_address = None
+    if literal_address is not None:
+        return origin
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        resolved = await asyncio.wait_for(
+            resolver(hostname, port), timeout=dns_timeout_seconds
+        )
+        addresses = tuple(ipaddress.ip_address(value) for value in resolved)
+    except Exception as exc:
+        raise UnsafeApplicationUrlError(
+            "Application URL host could not be safely resolved."
+        ) from exc
+    if not addresses:
+        raise UnsafeApplicationUrlError(
+            "Application URL host could not be safely resolved."
+        )
+    if not allow_private_network and any(
+        _is_non_public_address(address) for address in addresses
+    ):
+        raise UnsafeApplicationUrlError("Application URL host is not allowed.")
+    return origin
+
+
+def _is_non_public_address(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    return (
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_unspecified
+        or address.is_reserved
+    )
+
+
+def render_playwright_source(
+    plan: BrowserTestPlan,
+    *,
+    app_url: str,
+    allow_private_network: bool = False,
+) -> str:
     """Render reviewable source from known actions; the source is never executed."""
-    origin = validated_app_origin(app_url)
+    origin = validated_app_origin(app_url, allow_private_network=allow_private_network)
     lines = [
         "from urllib.parse import urlsplit, urlunsplit",
         "from playwright.sync_api import expect, sync_playwright",
@@ -77,11 +162,26 @@ def render_playwright_source(plan: BrowserTestPlan, *, app_url: str) -> str:
         "",
         "def _origin(url):",
         "    parsed = urlsplit(url)",
-        '    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), "", "", ""))',
+        '    if parsed.scheme not in ("http", "https") or not parsed.hostname:',
+        '        return ""',
+        "    if parsed.username is not None or parsed.password is not None:",
+        '        return ""',
+        "    try:",
+        "        port = parsed.port",
+        "    except ValueError:",
+        '        return ""',
+        '    hostname = parsed.hostname.rstrip(".").lower().encode("idna").decode("ascii")',
+        '    if ":" in hostname:',
+        '        hostname = f"[{hostname}]"',
+        '    default_port = (parsed.scheme == "http" and port == 80) or (',
+        '        parsed.scheme == "https" and port == 443',
+        "    )",
+        '    netloc = hostname if port is None or default_port else f"{hostname}:{port}"',
+        '    return urlunsplit((parsed.scheme.lower(), netloc, "", "", ""))',
         "",
         "",
-        "def _guard_navigation(route, request):",
-        "    if request.is_navigation_request() and _origin(request.url) != BASE_URL:",
+        "def _guard_request(route, request):",
+        "    if _origin(request.url) != BASE_URL:",
         '        route.abort("blockedbyclient")',
         "    else:",
         "        route.continue_()",
@@ -91,7 +191,8 @@ def render_playwright_source(plan: BrowserTestPlan, *, app_url: str) -> str:
         "    with sync_playwright() as playwright:",
         "        browser = playwright.chromium.launch(headless=True)",
         "        context = browser.new_context()",
-        '        context.route("**/*", _guard_navigation)',
+        '        context.route("**/*", _guard_request)',
+        '        context.route_web_socket("**/*", lambda ws: ws.close())',
         "        page = context.new_page()",
         f"        page.goto(BASE_URL + {json.dumps(plan.start_path)})",
     ]
@@ -135,17 +236,25 @@ class PlaywrightPlanRunner:
         *,
         action_timeout_ms: int,
         run_timeout_seconds: float,
+        allow_private_network: bool = False,
         playwright_factory: Callable[[], Any] = async_playwright,
+        resolver: AddressResolver = _resolve_hostname,
     ):
         self.action_timeout_ms = action_timeout_ms
         self.run_timeout_seconds = run_timeout_seconds
+        self.allow_private_network = allow_private_network
         self.playwright_factory = playwright_factory
+        self.resolver = resolver
 
     async def run(
         self, plan: BrowserTestPlan, *, app_url: str
     ) -> BrowserExecutionResult:
         try:
-            origin = validated_app_origin(app_url)
+            origin = await validate_public_application_origin(
+                app_url,
+                allow_private_network=self.allow_private_network,
+                resolver=self.resolver,
+            )
         except UnsafeApplicationUrlError:
             return _blocked(0, None, "The configured application URL is not safe.")
 
@@ -159,10 +268,11 @@ class PlaywrightPlanRunner:
                     browser_context = await browser.new_context()
                     await browser_context.route(
                         "**/*",
-                        lambda route, request: _guard_navigation(
+                        lambda route, request: _guard_request(
                             route, request, origin=origin
                         ),
                     )
+                    await browser_context.route_web_socket("**/*", _block_web_socket)
                     page = await browser_context.new_page()
                     page.set_default_timeout(self.action_timeout_ms)
                     await page.goto(origin + plan.start_path)
@@ -254,16 +364,20 @@ def _expected_value(action: BrowserAction) -> str | None:
     return None
 
 
-async def _guard_navigation(route: Any, request: Any, *, origin: str) -> None:
-    if request.is_navigation_request() and _origin(request.url) != origin:
+async def _guard_request(route: Any, request: Any, *, origin: str) -> None:
+    if _origin(request.url) != origin:
         await route.abort("blockedbyclient")
         return
     await route.continue_()
 
 
+async def _block_web_socket(web_socket: Any) -> None:
+    await web_socket.close()
+
+
 def _origin(url: str) -> str:
     try:
-        return validated_app_origin(url)
+        return validated_app_origin(url, allow_private_network=True)
     except UnsafeApplicationUrlError:
         return ""
 
