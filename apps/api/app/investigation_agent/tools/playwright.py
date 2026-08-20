@@ -190,7 +190,9 @@ def render_playwright_source(
         "def test_bug_reproduction():",
         "    with sync_playwright() as playwright:",
         "        browser = playwright.chromium.launch(headless=True)",
-        "        context = browser.new_context()",
+        "        context = browser.new_context(",
+        '            service_workers="block",',
+        "        )",
         '        context.route("**/*", _guard_request)',
         '        context.route_web_socket("**/*", lambda ws: ws.close())',
         "        page = context.new_page()",
@@ -265,7 +267,9 @@ class PlaywrightPlanRunner:
             async with asyncio.timeout(self.run_timeout_seconds):
                 async with self.playwright_factory() as playwright:
                     browser = await playwright.chromium.launch(headless=True)
-                    browser_context = await browser.new_context()
+                    browser_context = await browser.new_context(
+                        service_workers="block"
+                    )
                     await browser_context.route(
                         "**/*",
                         lambda route, request: _guard_request(

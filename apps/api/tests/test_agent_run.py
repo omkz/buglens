@@ -196,6 +196,8 @@ def test_url_safety_and_renderer_are_origin_locked_and_deterministic():
     assert 'BASE_URL = "https://demo.example.com"' in first
     assert 'page.locator("text=Checkout").click()' in first
     assert '_guard_request' in first
+    assert 'service_workers="block"' in first
+    assert "route_web_socket" in first
     assert "exec(" not in first
     assert "eval(" not in first
     with pytest.raises(ValueError):
@@ -572,7 +574,8 @@ class _FakeBrowser:
     def __init__(self):
         self.page = _FakePage()
 
-    async def new_context(self):
+    async def new_context(self, *, service_workers):
+        self.service_workers = service_workers
         return self
 
     async def route(self, pattern, handler):
@@ -616,14 +619,16 @@ async def test_runner_reports_not_reproduced_reproduced_and_blocked():
     async def public_resolver(hostname, port):
         return ["93.184.216.34"]
 
+    fake_playwright = _FakePlaywrightContext()
     runner = PlaywrightPlanRunner(
         action_timeout_ms=100,
         run_timeout_seconds=1,
-        playwright_factory=_FakePlaywrightContext,
+        playwright_factory=lambda: fake_playwright,
         resolver=public_resolver,
     )
     passed = await runner.run(plan, app_url="https://demo.example.com")
     assert passed.status == "not_reproduced"
+    assert fake_playwright.browser.service_workers == "block"
 
     async def private_resolver(hostname, port):
         return ["10.0.0.8"]
