@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import PurePosixPath
-from typing import Callable
 
 import httpx
 
@@ -40,6 +40,7 @@ class GitHubToolContext:
         installation_token: str,
         repository_full_name: str,
         default_branch: str,
+        progress_callback: Callable[[str, str], Awaitable[None]] | None = None,
     ):
         owner, separator, repository = repository_full_name.partition("/")
         if not separator or not owner or not repository or "/" in repository:
@@ -48,6 +49,7 @@ class GitHubToolContext:
         self.owner = owner
         self.repository = repository
         self.default_branch = default_branch
+        self._progress_callback = progress_callback
         self._tree: dict[str, github_client.GitHubRepositoryFile] | None = None
         self._bytes_read = 0
         self._files_read = 0
@@ -68,6 +70,10 @@ class GitHubToolContext:
             Returns paths and sizes only. Repository, installation, and branch are
             fixed by BugLens and cannot be selected by the caller.
             """
+            if context._progress_callback is not None:
+                await context._progress_callback(
+                    "investigating_repository", "Scanning repository files…"
+                )
             try:
                 files = await context._load_tree()
             except (github_client.GitHubAPIError, httpx.HTTPError):
@@ -101,6 +107,11 @@ class GitHubToolContext:
             query = query.strip()
             if not query or len(query) > 500:
                 return {"ok": False, "error": "Issue search query is invalid."}
+            if context._progress_callback is not None:
+                await context._progress_callback(
+                    "searching_duplicates",
+                    "Searching for possible duplicate issues…",
+                )
             try:
                 issues = await github_client.search_repository_issues(
                     context._token,
@@ -153,6 +164,11 @@ class GitHubToolContext:
             return {"ok": False, "error": "Repository file-read budget is exhausted."}
         if self._bytes_read + metadata.size > _MAX_TOTAL_FILE_BYTES:
             return {"ok": False, "error": "Repository context budget is exhausted."}
+
+        if self._progress_callback is not None:
+            await self._progress_callback(
+                "investigating_repository", f"Reading {path}…"
+            )
 
         payload = await github_client.read_repository_file(
             self._token,

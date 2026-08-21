@@ -92,8 +92,22 @@ export type AgentRunStatus = {
   investigation_id: string;
   status: "running" | "completed" | "failed" | null;
   result: AgentRunResult | null;
+  progress: AgentRunProgress | null;
   github_issue_status: "creating" | "created" | "failed" | null;
   github_issue: GitHubIssue | null;
+};
+
+export type AgentRunProgress = {
+  stage:
+    | "starting"
+    | "investigating_repository"
+    | "searching_duplicates"
+    | "preparing_reproduction"
+    | "running_browser"
+    | "completed"
+    | "failed";
+  message: string;
+  updated_at: string;
 };
 
 export type GitHubIssue = {

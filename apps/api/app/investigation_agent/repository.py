@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
@@ -61,6 +61,9 @@ class PersistedAgentRun:
     github_issue_number: int | None = None
     github_issue_title: str | None = None
     github_issue_url: str | None = None
+    progress_stage: str | None = None
+    progress_message: str | None = None
+    progress_updated_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +181,9 @@ async def claim_agent_run(
             github_issue_url=None,
             github_issue_created_at=None,
             github_issue_publish_started_at=None,
+            progress_stage=models.AgentRunProgressStage.STARTING.value,
+            progress_message="Starting investigation…",
+            progress_updated_at=started_at,
             started_at=started_at,
             completed_at=None,
         )
@@ -199,6 +205,9 @@ async def claim_agent_run(
         run.github_issue_url = None
         run.github_issue_created_at = None
         run.github_issue_publish_started_at = None
+        run.progress_stage = models.AgentRunProgressStage.STARTING.value
+        run.progress_message = "Starting investigation…"
+        run.progress_updated_at = started_at
         run.started_at = started_at
         run.completed_at = None
     await db.flush()
@@ -258,7 +267,11 @@ async def complete_agent_run(
         else result.cannot_reproduce_reason
     )
     run.execution_error = None
-    run.completed_at = datetime.now(UTC)
+    completed_at = datetime.now(UTC)
+    run.completed_at = completed_at
+    run.progress_stage = models.AgentRunProgressStage.COMPLETED.value
+    run.progress_message = "Investigation completed."
+    run.progress_updated_at = completed_at
     await db.flush()
     return _to_persisted(run)
 
@@ -278,9 +291,35 @@ async def mark_agent_run_failed(
         )
     ).scalar_one_or_none()
     if run is not None:
+        failed_at = datetime.now(UTC)
         run.status = models.AgentRunStatus.FAILED.value
         run.execution_error = "Investigation failed. Please try again."
-        run.completed_at = datetime.now(UTC)
+        run.completed_at = failed_at
+        run.progress_stage = models.AgentRunProgressStage.FAILED.value
+        run.progress_message = "Investigation failed."
+        run.progress_updated_at = failed_at
+
+
+async def update_agent_run_progress(
+    db: AsyncSession,
+    *,
+    investigation_id: uuid.UUID,
+    stage: models.AgentRunProgressStage,
+    message: str,
+) -> None:
+    """Persist one trusted progress snapshot only while the run is active."""
+    await db.execute(
+        update(models.InvestigationAgentRun)
+        .where(
+            models.InvestigationAgentRun.investigation_id == investigation_id,
+            models.InvestigationAgentRun.status == models.AgentRunStatus.RUNNING.value,
+        )
+        .values(
+            progress_stage=stage.value,
+            progress_message=message,
+            progress_updated_at=datetime.now(UTC),
+        )
+    )
 
 
 async def get_agent_run(
@@ -469,6 +508,9 @@ def _to_persisted(run: models.InvestigationAgentRun) -> PersistedAgentRun:
         github_issue_number=run.github_issue_number,
         github_issue_title=run.github_issue_title,
         github_issue_url=run.github_issue_url,
+        progress_stage=run.progress_stage,
+        progress_message=run.progress_message,
+        progress_updated_at=run.progress_updated_at,
     )
 
 

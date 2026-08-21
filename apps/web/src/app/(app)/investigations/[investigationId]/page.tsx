@@ -7,6 +7,7 @@ import { API_BASE_URL } from "@/lib/config";
 import { EvidenceRecorder } from "../_components/evidence-recorder";
 import type {
   AgentRunResult,
+  AgentRunProgress,
   AgentRunStatus,
   AnalysisStatus,
   BrowserAction,
@@ -55,6 +56,33 @@ function formatFileSize(value: number | null) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function progressStageLabel(stage: AgentRunProgress["stage"] | undefined) {
+  if (!stage) return "Starting investigation";
+  return {
+    starting: "Starting investigation",
+    investigating_repository: "Investigating repository",
+    searching_duplicates: "Searching duplicate issues",
+    preparing_reproduction: "Preparing browser reproduction",
+    running_browser: "Running browser reproduction",
+    completed: "Investigation completed",
+    failed: "Investigation failed",
+  }[stage];
+}
+
+function isAgentRunProgressStage(
+  value: string,
+): value is AgentRunProgress["stage"] {
+  return [
+    "starting",
+    "investigating_repository",
+    "searching_duplicates",
+    "preparing_reproduction",
+    "running_browser",
+    "completed",
+    "failed",
+  ].includes(value);
+}
+
 export default function InvestigationDetailPage() {
   const { investigationId } = useParams<{ investigationId: string }>();
   const [state, setState] = useState<DetailState>({
@@ -70,9 +98,20 @@ export default function InvestigationDetailPage() {
   const [investigationError, setInvestigationError] = useState<string | null>(
     null,
   );
+  const [liveProgressDisconnected, setLiveProgressDisconnected] =
+    useState(false);
   const [isCreatingIssue, setIsCreatingIssue] = useState(false);
   const [issueError, setIssueError] = useState<string | null>(null);
   const issueRequestActiveRef = useRef(false);
+  const investigationRequestActiveRef = useRef(false);
+  const progressSourceRef = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    return () => {
+      progressSourceRef.current?.close();
+      progressSourceRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -254,12 +293,81 @@ export default function InvestigationDetailPage() {
   }
 
   async function runInvestigation() {
-    if (state.status !== "ready" || isInvestigating) return;
+    if (
+      state.status !== "ready" ||
+      isInvestigating ||
+      investigationRequestActiveRef.current
+    )
+      return;
+    investigationRequestActiveRef.current = true;
     setIsInvestigating(true);
     setInvestigationError(null);
+    setLiveProgressDisconnected(false);
+
+    const encodedId = encodeURIComponent(investigationId);
+    const progressSource = new EventSource(
+      `${API_BASE_URL}/investigations/${encodedId}/agent-run/events`,
+      { withCredentials: true },
+    );
+    progressSourceRef.current = progressSource;
+
+    const receiveProgress = (event: MessageEvent<string>) => {
+      try {
+        const progress = JSON.parse(event.data) as Partial<AgentRunProgress>;
+        if (
+          typeof progress.stage !== "string" ||
+          !isAgentRunProgressStage(progress.stage) ||
+          typeof progress.message !== "string"
+        ) {
+          return;
+        }
+        const stage = progress.stage;
+        const message = progress.message;
+        setState((current) =>
+          current.status === "ready"
+            ? {
+                ...current,
+                agentRun: {
+                  ...current.agentRun,
+                  progress: {
+                    stage,
+                    message,
+                    updated_at: new Date().toISOString(),
+                  },
+                },
+              }
+            : current,
+        );
+      } catch {
+        // Ignore malformed transport data; the POST remains authoritative.
+      }
+    };
+    progressSource.addEventListener("progress", receiveProgress);
+    progressSource.addEventListener("complete", (event) => {
+      receiveProgress(event as MessageEvent<string>);
+      progressSource.close();
+      if (progressSourceRef.current === progressSource) {
+        progressSourceRef.current = null;
+      }
+    });
+    progressSource.addEventListener("failed", (event) => {
+      receiveProgress(event as MessageEvent<string>);
+      progressSource.close();
+      if (progressSourceRef.current === progressSource) {
+        progressSourceRef.current = null;
+      }
+    });
+    progressSource.onerror = () => {
+      if (progressSourceRef.current === progressSource) {
+        progressSource.close();
+        progressSourceRef.current = null;
+        setLiveProgressDisconnected(true);
+      }
+    };
+
     try {
       const response = await fetch(
-        `${API_BASE_URL}/investigations/${encodeURIComponent(investigationId)}/agent-run`,
+        `${API_BASE_URL}/investigations/${encodedId}/agent-run`,
         { method: "POST", credentials: "include" },
       );
       const body = (await response.json().catch(() => null)) as
@@ -303,6 +411,11 @@ export default function InvestigationDetailPage() {
         // A refresh reloads the persisted run state.
       }
     } finally {
+      progressSource.close();
+      if (progressSourceRef.current === progressSource) {
+        progressSourceRef.current = null;
+      }
+      investigationRequestActiveRef.current = false;
       setIsInvestigating(false);
     }
   }
@@ -575,13 +688,33 @@ export default function InvestigationDetailPage() {
                 )}
 
               {(state.agentRun.status === "running" || isInvestigating) && (
-                <p className="text-sm text-zinc-300">
-                  Investigating repository…
-                </p>
+                <div className="flex flex-col gap-2 rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Investigation progress
+                  </p>
+                  <p className="text-sm font-medium text-zinc-200">
+                    {progressStageLabel(state.agentRun.progress?.stage)}
+                  </p>
+                  <p className="text-sm text-zinc-400">
+                    {state.agentRun.progress?.message ||
+                      "Starting investigation…"}
+                  </p>
+                  {liveProgressDisconnected && isInvestigating && (
+                    <p className="text-xs text-amber-500/80">
+                      Live progress disconnected. The investigation is still running.
+                    </p>
+                  )}
+                </div>
               )}
 
               {state.agentRun.status === "failed" && !isInvestigating && (
                 <p className="text-sm text-red-300">Investigation failed.</p>
+              )}
+
+              {state.agentRun.status === "completed" && !isInvestigating && (
+                <p className="text-sm text-emerald-300">
+                  Investigation completed.
+                </p>
               )}
 
               {investigationError && (

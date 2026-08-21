@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -30,6 +31,9 @@ class InvestigationResultError(RuntimeError):
     """Raised when agent output violates trusted server-side constraints."""
 
 
+ProgressCallback = Callable[[str, str], Awaitable[None]]
+
+
 class InvestigationAgentService:
     """Run one autonomous investigation without holding a database transaction."""
 
@@ -49,10 +53,18 @@ class InvestigationAgentService:
         return self.agent.model_name
 
     async def investigate(
-        self, context: AgentRunContext
+        self,
+        context: AgentRunContext,
+        progress_callback: ProgressCallback | None = None,
     ) -> tuple[AgentInvestigationResult, str | None, BrowserExecutionResult | None]:
+        if progress_callback is not None:
+            await progress_callback("starting", "Starting investigation…")
         if not self.settings.gemini_api_key:
             raise AgentConfigurationError("Gemini is not configured.")
+        if progress_callback is not None:
+            await progress_callback(
+                "investigating_repository", "Inspecting repository…"
+            )
         try:
             installation_token = await create_scoped_installation_token(
                 settings=self.settings,
@@ -67,6 +79,7 @@ class InvestigationAgentService:
                     installation_token=installation_token,
                     repository_full_name=context.repository_full_name,
                     default_branch=context.default_branch,
+                    progress_callback=progress_callback,
                 )
             except ValueError as exc:
                 raise InvestigationResultError(
@@ -86,6 +99,10 @@ class InvestigationAgentService:
 
         if result.reproduction_plan is None:
             return result, None, None
+        if progress_callback is not None:
+            await progress_callback(
+                "preparing_reproduction", "Preparing browser reproduction…"
+            )
         if context.app_url is None:
             raise InvestigationResultError(
                 "Agent returned a browser plan without an application URL."
@@ -102,6 +119,10 @@ class InvestigationAgentService:
             )
         except UnsafeApplicationUrlError as exc:
             raise InvestigationResultError("Application URL is not safe.") from exc
+        if progress_callback is not None:
+            await progress_callback(
+                "running_browser", "Running browser reproduction…"
+            )
         execution = await self.runner.run(
             result.reproduction_plan,
             app_url=context.app_url,

@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from base64 import b64encode
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -37,7 +38,11 @@ from app.investigation_agent.schemas import (
     BrowserExecutionResult,
     BrowserTestPlan,
 )
-from app.investigation_agent.service import InvestigationGitHubError, _validate_agent_result
+from app.investigation_agent.service import (
+    InvestigationAgentService,
+    InvestigationGitHubError,
+    _validate_agent_result,
+)
 from app.investigation_agent.tools.github import GitHubToolContext
 from app.investigation_agent.tools.playwright import (
     PlaywrightPlanRunner,
@@ -443,10 +448,16 @@ async def test_github_tools_bound_tree_reads_issue_results_and_never_return_toke
     monkeypatch.setattr(tool_module.github_client, "list_repository_tree", tree)
     monkeypatch.setattr(tool_module.github_client, "read_repository_file", read)
     monkeypatch.setattr(tool_module.github_client, "search_repository_issues", issues)
+    progress = []
+
+    async def report(stage, message):
+        progress.append((stage, message))
+
     context = GitHubToolContext(
         installation_token="installation-secret-token",
         repository_full_name="octo-org/checkout",
         default_branch="main",
+        progress_callback=report,
     )
     list_files, read_file, search_issues = context.tools()
 
@@ -464,6 +475,11 @@ async def test_github_tools_bound_tree_reads_issue_results_and_never_return_toke
     assert traversal == {"ok": False, "error": "Repository path is invalid."}
     assert len(issue_result["issues"]) == 1
     assert "installation-secret-token" not in serialized
+    assert progress == [
+        ("investigating_repository", "Scanning repository files…"),
+        ("investigating_repository", "Reading src/checkout.ts…"),
+        ("searching_duplicates", "Searching for possible duplicate issues…"),
+    ]
 
 
 @pytest.mark.anyio
@@ -547,6 +563,61 @@ def test_agent_findings_and_duplicate_candidates_must_come_from_scoped_tools():
     invalid.repository_findings[0].path = "../../etc/passwd"
     with pytest.raises(Exception):
         _validate_agent_result(invalid, context)
+
+
+@pytest.mark.anyio
+async def test_service_emits_progress_only_at_trusted_orchestration_boundaries(
+    monkeypatch,
+):
+    from app.investigation_agent import service as service_module
+
+    class Agent:
+        model_name = "gemini-test-model"
+
+        async def investigate(self, **kwargs):
+            return _result(with_plan=True)
+
+    class Runner:
+        async def run(self, plan, *, app_url):
+            return BrowserExecutionResult(
+                status="not_reproduced",
+                completed_actions=len(plan.actions),
+                failed_action_index=None,
+                expected=None,
+                actual=None,
+                summary="The failure was not observed.",
+            )
+
+    async def token(**kwargs):
+        return "short-lived-token"
+
+    monkeypatch.setattr(service_module, "create_scoped_installation_token", token)
+    service = InvestigationAgentService(
+        agent=Agent(),
+        runner=Runner(),
+        settings=SimpleNamespace(
+            gemini_api_key="configured",
+            playwright_allow_private_network=False,
+        ),
+    )
+    progress = []
+
+    async def report(stage, message):
+        progress.append((stage, message))
+
+    result, generated_test, execution = await service.investigate(
+        _context(), progress_callback=report
+    )
+
+    assert result.reproduction_plan is not None
+    assert generated_test is not None
+    assert execution is not None
+    assert progress == [
+        ("starting", "Starting investigation…"),
+        ("investigating_repository", "Inspecting repository…"),
+        ("preparing_reproduction", "Preparing browser reproduction…"),
+        ("running_browser", "Running browser reproduction…"),
+    ]
 
 
 class _FakeLocator:
@@ -701,7 +772,7 @@ class _FakeAgentService:
         )
         self.calls = []
 
-    async def investigate(self, context):
+    async def investigate(self, context, progress_callback=None):
         self.calls.append(context)
         if isinstance(self.outcome, Exception):
             raise self.outcome
@@ -932,6 +1003,7 @@ def test_get_agent_run_is_scoped_and_returns_stable_empty_shape(monkeypatch):
         "investigation_id": str(investigation_id),
         "status": None,
         "result": None,
+        "progress": None,
         "github_issue_status": None,
         "github_issue": None,
     }
@@ -951,3 +1023,85 @@ def test_other_installation_cannot_read_agent_run(monkeypatch):
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 404
+
+
+def test_get_agent_run_restores_persisted_progress(monkeypatch):
+    service = _FakeAgentService()
+    client, app, routes, _connection = _connected_client(monkeypatch, service)
+    investigation_id = uuid.uuid4()
+    updated_at = datetime.now(UTC)
+    run = replace(
+        _persisted_run(investigation_id),
+        progress_stage="completed",
+        progress_message="Investigation completed.",
+        progress_updated_at=updated_at,
+    )
+
+    async def load(*args, **kwargs):
+        return AgentRunSnapshot(accessible=True, run=run)
+
+    monkeypatch.setattr(routes, "load_agent_run", load)
+    try:
+        response = client.get(f"/investigations/{investigation_id}/agent-run")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    progress = response.json()["progress"]
+    assert progress["stage"] == "completed"
+    assert progress["message"] == "Investigation completed."
+    assert datetime.fromisoformat(progress["updated_at"]) == updated_at
+
+
+def test_other_installation_cannot_stream_agent_progress(monkeypatch):
+    service = _FakeAgentService()
+    client, app, routes, _connection = _connected_client(monkeypatch, service)
+
+    async def inaccessible(*args, **kwargs):
+        return AgentRunSnapshot(accessible=False, run=None)
+
+    monkeypatch.setattr(routes, "load_agent_run", inaccessible)
+    try:
+        response = client.get(f"/investigations/{uuid.uuid4()}/agent-run/events")
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 404
+
+
+def test_progress_persistence_failure_does_not_abort_investigation(monkeypatch):
+    class ReportingService(_FakeAgentService):
+        async def investigate(self, context, progress_callback=None):
+            self.calls.append(context)
+            assert progress_callback is not None
+            await progress_callback("investigating_repository", "Inspecting repository…")
+            return self.outcome
+
+    class BrokenSessionContext:
+        async def __aenter__(self):
+            raise RuntimeError("database details that must remain internal")
+
+        async def __aexit__(self, *args):
+            return None
+
+    service = ReportingService()
+    client, app, routes, _connection = _connected_client(monkeypatch, service)
+    context = _context()
+    persisted = _persisted_run(context.investigation_id)
+
+    async def claim(*args, **kwargs):
+        return AgentRunClaim(state=AgentRunClaimState.READY, context=context)
+
+    async def complete(*args, **kwargs):
+        return persisted
+
+    monkeypatch.setattr(routes, "claim_agent_run", claim)
+    monkeypatch.setattr(routes, "complete_agent_run", complete)
+    monkeypatch.setattr(routes, "SessionLocal", lambda: BrokenSessionContext())
+    try:
+        response = client.post(f"/investigations/{context.investigation_id}/agent-run")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert "database details" not in response.text

@@ -30,6 +30,7 @@ from app.investigation_agent.repository import (
     get_agent_run,
     mark_github_issue_publication_failed,
     mark_agent_run_failed,
+    update_agent_run_progress,
 )
 from app.investigation_agent.schemas import AgentInvestigationResult
 from app.investigations.analyzer import BugAnalysis
@@ -536,6 +537,23 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert agent_claim.context is not None
                 assert agent_claim.context.repository_full_name == "first-org/first-repo"
                 await db.commit()
+                running_snapshot = await get_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert running_snapshot.run is not None
+                assert running_snapshot.run.progress_stage == "starting"
+                assert running_snapshot.run.progress_message == "Starting investigation…"
+                assert running_snapshot.run.progress_updated_at is not None
+
+                await update_agent_run_progress(
+                    db,
+                    investigation_id=first_investigation.id,
+                    stage=models.AgentRunProgressStage.INVESTIGATING_REPOSITORY,
+                    message="Inspecting repository…",
+                )
+                await db.commit()
 
                 concurrent_claim = await claim_agent_run(
                     db,
@@ -561,6 +579,29 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                     db, investigation_id=first_investigation.id
                 )
                 await db.commit()
+                failed_snapshot = await get_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert failed_snapshot.run is not None
+                assert failed_snapshot.run.progress_stage == "failed"
+                assert failed_snapshot.run.progress_message == "Investigation failed."
+
+                await update_agent_run_progress(
+                    db,
+                    investigation_id=first_investigation.id,
+                    stage=models.AgentRunProgressStage.RUNNING_BROWSER,
+                    message="Running browser reproduction…",
+                )
+                await db.commit()
+                unchanged_failed = await get_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert unchanged_failed.run is not None
+                assert unchanged_failed.run.progress_stage == "failed"
                 failed_run_publication = await claim_github_issue_publication(
                     db,
                     installation_id=first_connection.installation_id,
@@ -579,6 +620,14 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 )
                 assert retry_run.state == AgentRunClaimState.READY
                 await db.commit()
+                retry_snapshot = await get_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert retry_snapshot.run is not None
+                assert retry_snapshot.run.progress_stage == "starting"
+                assert retry_snapshot.run.progress_message == "Starting investigation…"
                 persisted_run = await complete_agent_run(
                     db,
                     investigation_id=first_investigation.id,
@@ -593,6 +642,8 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 )
                 await db.commit()
                 assert persisted_run.status == "completed"
+                assert persisted_run.progress_stage == "completed"
+                assert persisted_run.progress_message == "Investigation completed."
                 run_snapshot = await get_agent_run(
                     db,
                     installation_id=first_connection.installation_id,

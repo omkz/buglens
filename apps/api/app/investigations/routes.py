@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import PurePath
 from typing import Literal
@@ -19,14 +22,14 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db import models
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.integrations.github import client as github_client
 from app.integrations.github.repository import (
     PersistedGitHubConnection,
@@ -53,6 +56,7 @@ from app.investigation_agent.repository import (
     get_agent_run as load_agent_run,
     mark_github_issue_publication_failed,
     mark_agent_run_failed,
+    update_agent_run_progress,
 )
 from app.investigation_agent.schemas import (
     BrowserExecutionResult,
@@ -170,10 +174,17 @@ class GitHubIssueResponse(BaseModel):
     url: str
 
 
+class AgentRunProgressResponse(BaseModel):
+    stage: models.AgentRunProgressStage
+    message: str
+    updated_at: datetime
+
+
 class AgentRunStatusResponse(BaseModel):
     investigation_id: uuid.UUID
     status: models.AgentRunStatus | None
     result: AgentRunResultResponse | None
+    progress: AgentRunProgressResponse | None
     github_issue_status: models.GitHubIssuePublicationStatus | None
     github_issue: GitHubIssueResponse | None
 
@@ -747,7 +758,8 @@ async def run_agent_investigation(
 
     try:
         result, generated_test, execution = await agent_service.investigate(
-            claim.context
+            claim.context,
+            progress_callback=_agent_progress_callback(investigation_id),
         )
     except AgentConfigurationError as exc:
         await _best_effort_mark_agent_run_failed(db, investigation_id)
@@ -834,6 +846,50 @@ async def get_agent_investigation(
     if not snapshot.accessible:
         raise HTTPException(status_code=404, detail="Investigation not found.")
     return _agent_run_response(investigation_id, snapshot.run)
+
+
+@router.get(
+    "/investigations/{investigation_id}/agent-run/events",
+    response_class=StreamingResponse,
+)
+async def stream_agent_investigation_progress(
+    investigation_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    connection = await _require_connection(request, db)
+    try:
+        snapshot = await load_agent_run(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+        )
+        await db.rollback()
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "agent_run_event_authorization_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503, detail="Investigation progress is temporarily unavailable."
+        ) from None
+    if not snapshot.accessible:
+        raise HTTPException(status_code=404, detail="Investigation not found.")
+
+    return StreamingResponse(
+        _agent_run_event_stream(
+            request,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post(
@@ -956,6 +1012,7 @@ def _agent_run_response(
             investigation_id=investigation_id,
             status=None,
             result=None,
+            progress=None,
             github_issue_status=None,
             github_issue=None,
         )
@@ -992,6 +1049,17 @@ def _agent_run_response(
         investigation_id=investigation_id,
         status=models.AgentRunStatus(run.status),
         result=result,
+        progress=(
+            AgentRunProgressResponse(
+                stage=models.AgentRunProgressStage(run.progress_stage),
+                message=run.progress_message,
+                updated_at=run.progress_updated_at,
+            )
+            if run.progress_stage is not None
+            and run.progress_message is not None
+            and run.progress_updated_at is not None
+            else None
+        ),
         github_issue_status=(
             models.GitHubIssuePublicationStatus(run.github_issue_status)
             if run.github_issue_status is not None
@@ -1011,6 +1079,101 @@ def _agent_run_response(
             else None
         ),
     )
+
+
+def _agent_progress_callback(investigation_id: uuid.UUID):
+    async def persist(stage: str, message: str) -> None:
+        try:
+            progress_stage = models.AgentRunProgressStage(stage)
+            async with SessionLocal() as progress_db:
+                await update_agent_run_progress(
+                    progress_db,
+                    investigation_id=investigation_id,
+                    stage=progress_stage,
+                    message=message,
+                )
+                await progress_db.commit()
+        except Exception as exc:
+            logger.warning(
+                "agent_run_progress_update_failed",
+                investigation_id=str(investigation_id),
+                exception_type=type(exc).__name__,
+            )
+
+    return persist
+
+
+async def _agent_run_event_stream(
+    request: Request,
+    *,
+    installation_id: uuid.UUID,
+    investigation_id: uuid.UUID,
+    poll_interval_seconds: float = 0.75,
+    initial_terminal_grace_seconds: float = 1.5,
+) -> AsyncIterator[str]:
+    last_progress: tuple[str, str] | None = None
+    polls_since_heartbeat = 0
+    terminal_grace_deadline = (
+        asyncio.get_running_loop().time() + initial_terminal_grace_seconds
+    )
+    while not await request.is_disconnected():
+        try:
+            async with SessionLocal() as event_db:
+                snapshot = await load_agent_run(
+                    event_db,
+                    installation_id=installation_id,
+                    investigation_id=investigation_id,
+                )
+                await event_db.rollback()
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "agent_run_progress_read_failed",
+                investigation_id=str(investigation_id),
+                exception_type=type(exc).__name__,
+            )
+            snapshot = None
+
+        if snapshot is not None and not snapshot.accessible:
+            return
+        run = snapshot.run if snapshot is not None else None
+        if (
+            run is not None
+            and run.progress_stage is not None
+            and run.progress_message is not None
+            and run.progress_updated_at is not None
+        ):
+            progress = (run.progress_stage, run.progress_message)
+            if progress != last_progress:
+                event = (
+                    "complete"
+                    if run.progress_stage == models.AgentRunProgressStage.COMPLETED.value
+                    else "failed"
+                    if run.progress_stage == models.AgentRunProgressStage.FAILED.value
+                    else "progress"
+                )
+                if (
+                    last_progress is None
+                    and event in {"complete", "failed"}
+                    and asyncio.get_running_loop().time() < terminal_grace_deadline
+                ):
+                    await asyncio.sleep(poll_interval_seconds)
+                    continue
+                payload = json.dumps(
+                    {"stage": run.progress_stage, "message": run.progress_message},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                yield f"event: {event}\ndata: {payload}\n\n"
+                last_progress = progress
+                polls_since_heartbeat = 0
+                if event in {"complete", "failed"}:
+                    return
+
+        polls_since_heartbeat += 1
+        if polls_since_heartbeat >= 20:
+            yield ": keepalive\n\n"
+            polls_since_heartbeat = 0
+        await asyncio.sleep(poll_interval_seconds)
 
 
 def _github_issue_publication_response(

@@ -363,6 +363,33 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     assert "c5a6b7d8e9f0" in revisions  # add Investigation-owned evidence
     assert "d6b7c8e9f0a1" in revisions  # add current structured analysis
     assert "e7c8d9f0a1b2" in revisions  # add autonomous investigation runs
+    assert "f8d9e0a1b2c3" in revisions  # add GitHub issue publication
+    assert "a9e0f1b2c3d4" in revisions  # add persisted AgentRun progress
+
+
+def test_agent_run_progress_schema_and_migration_are_constrained_and_reversible():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    table = Base.metadata.tables["investigation_agent_runs"]
+    assert table.c.progress_stage.nullable
+    assert isinstance(table.c.progress_message.type, Text)
+    assert table.c.progress_updated_at.type.timezone is True
+    constraint = next(
+        item
+        for item in table.constraints
+        if item.name == "ck_investigation_agent_runs_progress_stage"
+    )
+    for stage in models.AgentRunProgressStage:
+        assert stage.value in str(constraint.sqltext)
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("a9e0f1b2c3d4")
+    source = Path(revision.path).read_text()
+    assert revision.down_revision == "f8d9e0a1b2c3"
+    assert 'op.drop_column("investigation_agent_runs", "progress_stage")' in source
+    assert "ck_investigation_agent_runs_progress_stage" in source
 
 
 def test_projects_migration_is_linear_and_supports_clean_downgrade():
