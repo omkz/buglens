@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import itsdangerous
 import pytest
 from sqlalchemy import delete, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import NoResultFound, SQLAlchemyError
 
 from app.config import get_settings
 from app.db import models
@@ -582,7 +582,9 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 await db.rollback()
 
                 await mark_agent_run_failed(
-                    db, investigation_id=first_investigation.id
+                    db,
+                    investigation_id=first_investigation.id,
+                    attempt_id=first_attempt_id,
                 )
                 await db.commit()
                 failed_snapshot = await get_agent_run(
@@ -639,6 +641,12 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert retry_snapshot.run.progress_message == "Starting investigation…"
                 assert retry_snapshot.run.run_attempt_id == retry_attempt_id
                 assert retry_snapshot.run.run_attempt_id != first_attempt_id
+                await mark_agent_run_failed(
+                    db,
+                    investigation_id=first_investigation.id,
+                    attempt_id=first_attempt_id,
+                )
+                await db.commit()
                 await update_agent_run_progress(
                     db,
                     investigation_id=first_investigation.id,
@@ -654,9 +662,25 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 )
                 assert attempt_scoped_snapshot.run is not None
                 assert attempt_scoped_snapshot.run.progress_stage == "starting"
+                with pytest.raises(NoResultFound):
+                    await complete_agent_run(
+                        db,
+                        investigation_id=first_investigation.id,
+                        attempt_id=first_attempt_id,
+                        result=AgentInvestigationResult(
+                            repository_findings=[],
+                            duplicate_candidates=[],
+                            reproduction_plan=None,
+                            cannot_reproduce_reason="Stale attempt.",
+                        ),
+                        generated_test=None,
+                        execution=None,
+                    )
+                await db.rollback()
                 persisted_run = await complete_agent_run(
                     db,
                     investigation_id=first_investigation.id,
+                    attempt_id=retry_attempt_id,
                     result=AgentInvestigationResult(
                         repository_findings=[],
                         duplicate_candidates=[],

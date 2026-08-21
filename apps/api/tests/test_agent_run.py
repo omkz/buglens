@@ -12,6 +12,7 @@ import itsdangerous
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
 from app.db.session import get_db
@@ -893,6 +894,7 @@ def test_agent_run_is_installation_scoped_ignores_browser_ids_and_persists(monke
     assert captured["claim"]["installation_id"] == connection.installation_id
     assert captured["claim"]["agent_model"] == "gemini-test-model"
     assert captured["claim"]["attempt_id"] == attempt_id
+    assert captured["complete"]["attempt_id"] == attempt_id
     assert service.calls == [context]
     assert response.json()["status"] == "completed"
 
@@ -920,20 +922,21 @@ def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatc
     service = _FakeAgentService(AgentProviderError("raw model response with secret"))
     client, app, routes, _connection = _connected_client(monkeypatch, service)
     context = _context()
+    attempt_id = uuid.uuid4()
     failed = []
 
     async def claim(*args, **kwargs):
         return AgentRunClaim(state=AgentRunClaimState.READY, context=context)
 
     async def mark(*args, **kwargs):
-        failed.append(kwargs["investigation_id"])
+        failed.append((kwargs["investigation_id"], kwargs["attempt_id"]))
 
     monkeypatch.setattr(routes, "claim_agent_run", claim)
     monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
     try:
         response = client.post(
             f"/investigations/{context.investigation_id}/agent-run",
-            json={"attempt_id": str(uuid.uuid4())},
+            json={"attempt_id": str(attempt_id)},
         )
     finally:
         app.dependency_overrides.clear()
@@ -942,7 +945,7 @@ def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatc
         "detail": "Autonomous investigation failed. Please try again."
     }
     assert "raw model" not in response.text
-    assert failed == [context.investigation_id]
+    assert failed == [(context.investigation_id, attempt_id)]
 
 
 @pytest.mark.parametrize(
@@ -966,25 +969,64 @@ def test_agent_system_failures_return_safe_responses(
     service = _FakeAgentService(failure)
     client, app, routes, _connection = _connected_client(monkeypatch, service)
     context = _context()
+    attempt_id = uuid.uuid4()
+    failed = []
 
     async def claim(*args, **kwargs):
         return AgentRunClaim(state=AgentRunClaimState.READY, context=context)
 
     async def mark(*args, **kwargs):
-        return None
+        failed.append((kwargs["investigation_id"], kwargs["attempt_id"]))
 
     monkeypatch.setattr(routes, "claim_agent_run", claim)
     monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
     try:
         response = client.post(
             f"/investigations/{context.investigation_id}/agent-run",
-            json={"attempt_id": str(uuid.uuid4())},
+            json={"attempt_id": str(attempt_id)},
         )
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == status_code
     assert response.json() == {"detail": detail}
     assert str(failure) not in response.text
+    assert failed == [(context.investigation_id, attempt_id)]
+
+
+def test_agent_result_persistence_failure_marks_exact_attempt_failed(monkeypatch):
+    service = _FakeAgentService()
+    client, app, routes, _connection = _connected_client(monkeypatch, service)
+    context = _context()
+    attempt_id = uuid.uuid4()
+    failed = []
+
+    async def claim(*args, **kwargs):
+        return AgentRunClaim(state=AgentRunClaimState.READY, context=context)
+
+    async def complete(*args, **kwargs):
+        assert kwargs["attempt_id"] == attempt_id
+        raise SQLAlchemyError("database details that must remain internal")
+
+    async def mark(*args, **kwargs):
+        failed.append((kwargs["investigation_id"], kwargs["attempt_id"]))
+
+    monkeypatch.setattr(routes, "claim_agent_run", claim)
+    monkeypatch.setattr(routes, "complete_agent_run", complete)
+    monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
+    try:
+        response = client.post(
+            f"/investigations/{context.investigation_id}/agent-run",
+            json={"attempt_id": str(attempt_id)},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Investigation is temporarily unavailable."
+    }
+    assert failed == [(context.investigation_id, attempt_id)]
+    assert "database details" not in response.text
 
 
 def test_agent_run_requires_a_valid_signed_connection(monkeypatch):

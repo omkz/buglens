@@ -773,7 +773,9 @@ async def run_agent_investigation(
             ),
         )
     except AgentConfigurationError as exc:
-        await _best_effort_mark_agent_run_failed(db, investigation_id)
+        await _best_effort_mark_agent_run_failed(
+            db, investigation_id, payload.attempt_id
+        )
         logger.warning(
             "agent_run_configuration_missing",
             investigation_id=str(investigation_id),
@@ -783,7 +785,9 @@ async def run_agent_investigation(
             status_code=503, detail="Autonomous investigation is not configured."
         ) from None
     except InvestigationGitHubError as exc:
-        await _best_effort_mark_agent_run_failed(db, investigation_id)
+        await _best_effort_mark_agent_run_failed(
+            db, investigation_id, payload.attempt_id
+        )
         logger.warning(
             "agent_run_github_failed",
             investigation_id=str(investigation_id),
@@ -794,7 +798,9 @@ async def run_agent_investigation(
             detail="Repository investigation failed. Please try again.",
         ) from None
     except (AgentProviderError, InvestigationResultError) as exc:
-        await _best_effort_mark_agent_run_failed(db, investigation_id)
+        await _best_effort_mark_agent_run_failed(
+            db, investigation_id, payload.attempt_id
+        )
         logger.warning(
             "agent_run_provider_failed",
             investigation_id=str(investigation_id),
@@ -809,6 +815,7 @@ async def run_agent_investigation(
         persisted = await complete_agent_run(
             db,
             investigation_id=investigation_id,
+            attempt_id=payload.attempt_id,
             result=result,
             generated_test=generated_test,
             execution=execution,
@@ -816,7 +823,9 @@ async def run_agent_investigation(
         await db.commit()
     except SQLAlchemyError:
         await db.rollback()
-        await _best_effort_mark_agent_run_failed(db, investigation_id)
+        await _best_effort_mark_agent_run_failed(
+            db, investigation_id, payload.attempt_id
+        )
         logger.exception(
             "agent_run_persistence_failed",
             investigation_id=str(investigation_id),
@@ -1229,10 +1238,14 @@ async def _best_effort_mark_analysis_failed(
 
 
 async def _best_effort_mark_agent_run_failed(
-    db: AsyncSession, investigation_id: uuid.UUID
+    db: AsyncSession, investigation_id: uuid.UUID, attempt_id: uuid.UUID
 ) -> None:
     try:
-        await mark_agent_run_failed(db, investigation_id=investigation_id)
+        await mark_agent_run_failed(
+            db,
+            investigation_id=investigation_id,
+            attempt_id=attempt_id,
+        )
         await db.commit()
     except SQLAlchemyError:
         await db.rollback()

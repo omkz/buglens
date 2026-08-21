@@ -233,6 +233,7 @@ async def complete_agent_run(
     db: AsyncSession,
     *,
     investigation_id: uuid.UUID,
+    attempt_id: uuid.UUID,
     result: AgentInvestigationResult,
     generated_test: str | None,
     execution: BrowserExecutionResult | None,
@@ -242,6 +243,7 @@ async def complete_agent_run(
             select(models.InvestigationAgentRun)
             .where(
                 models.InvestigationAgentRun.investigation_id == investigation_id,
+                models.InvestigationAgentRun.run_attempt_id == attempt_id,
                 models.InvestigationAgentRun.status
                 == models.AgentRunStatus.RUNNING.value,
             )
@@ -281,13 +283,14 @@ async def complete_agent_run(
 
 
 async def mark_agent_run_failed(
-    db: AsyncSession, *, investigation_id: uuid.UUID
+    db: AsyncSession, *, investigation_id: uuid.UUID, attempt_id: uuid.UUID
 ) -> None:
     run = (
         await db.execute(
             select(models.InvestigationAgentRun)
             .where(
                 models.InvestigationAgentRun.investigation_id == investigation_id,
+                models.InvestigationAgentRun.run_attempt_id == attempt_id,
                 models.InvestigationAgentRun.status
                 == models.AgentRunStatus.RUNNING.value,
             )
