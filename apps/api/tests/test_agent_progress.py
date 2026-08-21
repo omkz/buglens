@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+from inspect import signature
 
 import pytest
 
@@ -17,9 +18,9 @@ def _run(
     *,
     stage: str,
     message: str,
-    offset: int,
+    attempt_id: uuid.UUID,
 ) -> PersistedAgentRun:
-    now = datetime.now(UTC) + timedelta(seconds=offset)
+    now = datetime.now(UTC)
     terminal = stage in {"completed", "failed"}
     return PersistedAgentRun(
         id=uuid.uuid4(),
@@ -38,6 +39,7 @@ def _run(
         progress_stage=stage,
         progress_message=message,
         progress_updated_at=now,
+        run_attempt_id=attempt_id,
     )
 
 
@@ -78,17 +80,18 @@ class _SessionFactory:
 @pytest.mark.anyio
 async def test_sse_waits_for_run_emits_changes_and_complete_then_closes(monkeypatch):
     investigation_id = uuid.uuid4()
+    attempt_id = uuid.uuid4()
     starting = _run(
         investigation_id,
         stage="starting",
         message="Starting investigation…",
-        offset=1,
+        attempt_id=attempt_id,
     )
     completed = _run(
         investigation_id,
         stage="completed",
         message="Investigation completed.",
-        offset=2,
+        attempt_id=attempt_id,
     )
     snapshots = iter(
         [
@@ -109,14 +112,15 @@ async def test_sse_waits_for_run_emits_changes_and_complete_then_closes(monkeypa
         _Request(),
         installation_id=uuid.uuid4(),
         investigation_id=investigation_id,
+        attempt_id=attempt_id,
         poll_interval_seconds=0,
-        initial_terminal_grace_seconds=0,
     )
 
     first = await anext(stream)
     second = await anext(stream)
     assert "event: progress" in first
     assert '"stage":"starting"' in first
+    assert f'"attempt_id":"{attempt_id}"' in first
     assert "event: complete" in second
     assert '"message":"Investigation completed."' in second
     with pytest.raises(StopAsyncIteration):
@@ -128,11 +132,12 @@ async def test_sse_waits_for_run_emits_changes_and_complete_then_closes(monkeypa
 @pytest.mark.anyio
 async def test_sse_failed_event_is_safe_and_closes(monkeypatch):
     investigation_id = uuid.uuid4()
+    attempt_id = uuid.uuid4()
     failed = _run(
         investigation_id,
         stage="failed",
         message="Investigation failed.",
-        offset=1,
+        attempt_id=attempt_id,
     )
 
     async def load(*args, **kwargs):
@@ -145,13 +150,14 @@ async def test_sse_failed_event_is_safe_and_closes(monkeypatch):
         _Request(),
         installation_id=uuid.uuid4(),
         investigation_id=investigation_id,
+        attempt_id=attempt_id,
         poll_interval_seconds=0,
-        initial_terminal_grace_seconds=0,
     )
 
     event = await anext(stream)
     assert event == (
-        'event: failed\ndata: {"stage":"failed",'
+        f'event: failed\ndata: {{"attempt_id":"{attempt_id}",'
+        '"stage":"failed",'
         '"message":"Investigation failed."}\n\n'
     )
     assert "token" not in event
@@ -161,23 +167,28 @@ async def test_sse_failed_event_is_safe_and_closes(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_sse_retry_does_not_close_on_stale_failed_snapshot(monkeypatch):
+@pytest.mark.parametrize("old_stage", ["failed", "completed"])
+async def test_sse_retry_ignores_old_terminal_attempt_until_new_attempt_starts(
+    monkeypatch, old_stage
+):
     investigation_id = uuid.uuid4()
-    stale_failed = _run(
+    old_attempt_id = uuid.uuid4()
+    requested_attempt_id = uuid.uuid4()
+    stale_terminal = _run(
         investigation_id,
-        stage="failed",
-        message="Investigation failed.",
-        offset=-30,
+        stage=old_stage,
+        message=f"Old {old_stage} progress must not leak.",
+        attempt_id=old_attempt_id,
     )
     starting = _run(
         investigation_id,
         stage="starting",
         message="Starting investigation…",
-        offset=1,
+        attempt_id=requested_attempt_id,
     )
     snapshots = iter(
         [
-            AgentRunSnapshot(accessible=True, run=stale_failed),
+            AgentRunSnapshot(accessible=True, run=stale_terminal),
             AgentRunSnapshot(accessible=True, run=starting),
         ]
     )
@@ -191,10 +202,23 @@ async def test_sse_retry_does_not_close_on_stale_failed_snapshot(monkeypatch):
         _Request(),
         installation_id=uuid.uuid4(),
         investigation_id=investigation_id,
+        attempt_id=requested_attempt_id,
         poll_interval_seconds=0,
-        initial_terminal_grace_seconds=10,
     )
 
     event = await anext(stream)
     assert "event: progress" in event
     assert '"stage":"starting"' in event
+    assert f'"attempt_id":"{requested_attempt_id}"' in event
+    assert str(old_attempt_id) not in event
+    assert "Old " not in event
+
+
+def test_sse_generator_uses_attempt_identity_without_timing_parameters():
+    assert set(signature(routes._agent_run_event_stream).parameters) == {
+        "request",
+        "installation_id",
+        "investigation_id",
+        "attempt_id",
+        "poll_interval_seconds",
+    }

@@ -853,7 +853,10 @@ def test_agent_run_preconditions(monkeypatch, claim_state, status_code):
 
     monkeypatch.setattr(routes, "claim_agent_run", claim)
     try:
-        response = client.post(f"/investigations/{uuid.uuid4()}/agent-run")
+        response = client.post(
+            f"/investigations/{uuid.uuid4()}/agent-run",
+            json={"attempt_id": str(uuid.uuid4())},
+        )
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == status_code
@@ -865,6 +868,7 @@ def test_agent_run_is_installation_scoped_ignores_browser_ids_and_persists(monke
     client, app, routes, connection = _connected_client(monkeypatch, service)
     context = _context()
     persisted = _persisted_run(context.investigation_id)
+    attempt_id = uuid.uuid4()
     captured = {}
 
     async def claim(db, **kwargs):
@@ -880,12 +884,7 @@ def test_agent_run_is_installation_scoped_ignores_browser_ids_and_persists(monke
     try:
         response = client.post(
             f"/investigations/{context.investigation_id}/agent-run",
-            json={
-                "installation_id": str(uuid.uuid4()),
-                "repository": "attacker/repo",
-                "branch": "evil",
-                "github_token": "browser-token",
-            },
+            json={"attempt_id": str(attempt_id)},
         )
     finally:
         app.dependency_overrides.clear()
@@ -893,9 +892,28 @@ def test_agent_run_is_installation_scoped_ignores_browser_ids_and_persists(monke
     assert response.status_code == 200
     assert captured["claim"]["installation_id"] == connection.installation_id
     assert captured["claim"]["agent_model"] == "gemini-test-model"
+    assert captured["claim"]["attempt_id"] == attempt_id
     assert service.calls == [context]
-    assert "browser-token" not in response.text
     assert response.json()["status"] == "completed"
+
+
+def test_agent_run_request_rejects_browser_selected_metadata(monkeypatch):
+    service = _FakeAgentService()
+    client, app, _routes, _connection = _connected_client(monkeypatch, service)
+    try:
+        response = client.post(
+            f"/investigations/{uuid.uuid4()}/agent-run",
+            json={
+                "attempt_id": str(uuid.uuid4()),
+                "repository": "attacker/repo",
+                "github_token": "browser-token",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert service.calls == []
 
 
 def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatch):
@@ -913,7 +931,10 @@ def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatc
     monkeypatch.setattr(routes, "claim_agent_run", claim)
     monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
     try:
-        response = client.post(f"/investigations/{context.investigation_id}/agent-run")
+        response = client.post(
+            f"/investigations/{context.investigation_id}/agent-run",
+            json={"attempt_id": str(uuid.uuid4())},
+        )
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 502
@@ -955,7 +976,10 @@ def test_agent_system_failures_return_safe_responses(
     monkeypatch.setattr(routes, "claim_agent_run", claim)
     monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
     try:
-        response = client.post(f"/investigations/{context.investigation_id}/agent-run")
+        response = client.post(
+            f"/investigations/{context.investigation_id}/agent-run",
+            json={"attempt_id": str(uuid.uuid4())},
+        )
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == status_code
@@ -973,7 +997,10 @@ def test_agent_run_requires_a_valid_signed_connection(monkeypatch):
     app.dependency_overrides[get_db] = database
     try:
         client = TestClient(app)
-        missing = client.post(f"/investigations/{uuid.uuid4()}/agent-run")
+        missing = client.post(
+            f"/investigations/{uuid.uuid4()}/agent-run",
+            json={"attempt_id": str(uuid.uuid4())},
+        )
         assert missing.status_code == 401
 
         client.cookies.set("buglens_session", _signed_session_cookie("not-a-uuid"))
@@ -1001,6 +1028,7 @@ def test_get_agent_run_is_scoped_and_returns_stable_empty_shape(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "investigation_id": str(investigation_id),
+        "attempt_id": None,
         "status": None,
         "result": None,
         "progress": None,
@@ -1030,11 +1058,13 @@ def test_get_agent_run_restores_persisted_progress(monkeypatch):
     client, app, routes, _connection = _connected_client(monkeypatch, service)
     investigation_id = uuid.uuid4()
     updated_at = datetime.now(UTC)
+    attempt_id = uuid.uuid4()
     run = replace(
         _persisted_run(investigation_id),
         progress_stage="completed",
         progress_message="Investigation completed.",
         progress_updated_at=updated_at,
+        run_attempt_id=attempt_id,
     )
 
     async def load(*args, **kwargs):
@@ -1047,6 +1077,7 @@ def test_get_agent_run_restores_persisted_progress(monkeypatch):
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
+    assert response.json()["attempt_id"] == str(attempt_id)
     progress = response.json()["progress"]
     assert progress["stage"] == "completed"
     assert progress["message"] == "Investigation completed."
@@ -1062,7 +1093,10 @@ def test_other_installation_cannot_stream_agent_progress(monkeypatch):
 
     monkeypatch.setattr(routes, "load_agent_run", inaccessible)
     try:
-        response = client.get(f"/investigations/{uuid.uuid4()}/agent-run/events")
+        response = client.get(
+            f"/investigations/{uuid.uuid4()}/agent-run/events",
+            params={"attempt_id": str(uuid.uuid4())},
+        )
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 404
@@ -1098,7 +1132,10 @@ def test_progress_persistence_failure_does_not_abort_investigation(monkeypatch):
     monkeypatch.setattr(routes, "complete_agent_run", complete)
     monkeypatch.setattr(routes, "SessionLocal", lambda: BrokenSessionContext())
     try:
-        response = client.post(f"/investigations/{context.investigation_id}/agent-run")
+        response = client.post(
+            f"/investigations/{context.investigation_id}/agent-run",
+            json={"attempt_id": str(uuid.uuid4())},
+        )
     finally:
         app.dependency_overrides.clear()
 

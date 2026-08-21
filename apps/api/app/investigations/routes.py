@@ -180,8 +180,15 @@ class AgentRunProgressResponse(BaseModel):
     updated_at: datetime
 
 
+class RunAgentInvestigationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempt_id: uuid.UUID
+
+
 class AgentRunStatusResponse(BaseModel):
     investigation_id: uuid.UUID
+    attempt_id: uuid.UUID | None
     status: models.AgentRunStatus | None
     result: AgentRunResultResponse | None
     progress: AgentRunProgressResponse | None
@@ -707,6 +714,7 @@ async def get_investigation_analysis(
 )
 async def run_agent_investigation(
     investigation_id: uuid.UUID,
+    payload: RunAgentInvestigationRequest,
     request: Request,
     agent_service: InvestigationAgentService = Depends(
         get_investigation_agent_service
@@ -720,6 +728,7 @@ async def run_agent_investigation(
             installation_id=connection.installation_id,
             investigation_id=investigation_id,
             agent_model=agent_service.model_name,
+            attempt_id=payload.attempt_id,
         )
         if claim.state == AgentRunClaimState.NOT_FOUND:
             await db.rollback()
@@ -759,7 +768,9 @@ async def run_agent_investigation(
     try:
         result, generated_test, execution = await agent_service.investigate(
             claim.context,
-            progress_callback=_agent_progress_callback(investigation_id),
+            progress_callback=_agent_progress_callback(
+                investigation_id, payload.attempt_id
+            ),
         )
     except AgentConfigurationError as exc:
         await _best_effort_mark_agent_run_failed(db, investigation_id)
@@ -854,6 +865,7 @@ async def get_agent_investigation(
 )
 async def stream_agent_investigation_progress(
     investigation_id: uuid.UUID,
+    attempt_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
@@ -883,6 +895,7 @@ async def stream_agent_investigation_progress(
             request,
             installation_id=connection.installation_id,
             investigation_id=investigation_id,
+            attempt_id=attempt_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -1011,6 +1024,7 @@ def _agent_run_response(
         return AgentRunStatusResponse(
             investigation_id=investigation_id,
             status=None,
+            attempt_id=None,
             result=None,
             progress=None,
             github_issue_status=None,
@@ -1048,6 +1062,7 @@ def _agent_run_response(
     return AgentRunStatusResponse(
         investigation_id=investigation_id,
         status=models.AgentRunStatus(run.status),
+        attempt_id=run.run_attempt_id,
         result=result,
         progress=(
             AgentRunProgressResponse(
@@ -1081,7 +1096,9 @@ def _agent_run_response(
     )
 
 
-def _agent_progress_callback(investigation_id: uuid.UUID):
+def _agent_progress_callback(
+    investigation_id: uuid.UUID, attempt_id: uuid.UUID
+):
     async def persist(stage: str, message: str) -> None:
         try:
             progress_stage = models.AgentRunProgressStage(stage)
@@ -1089,6 +1106,7 @@ def _agent_progress_callback(investigation_id: uuid.UUID):
                 await update_agent_run_progress(
                     progress_db,
                     investigation_id=investigation_id,
+                    attempt_id=attempt_id,
                     stage=progress_stage,
                     message=message,
                 )
@@ -1108,14 +1126,11 @@ async def _agent_run_event_stream(
     *,
     installation_id: uuid.UUID,
     investigation_id: uuid.UUID,
+    attempt_id: uuid.UUID,
     poll_interval_seconds: float = 0.75,
-    initial_terminal_grace_seconds: float = 1.5,
 ) -> AsyncIterator[str]:
     last_progress: tuple[str, str] | None = None
     polls_since_heartbeat = 0
-    terminal_grace_deadline = (
-        asyncio.get_running_loop().time() + initial_terminal_grace_seconds
-    )
     while not await request.is_disconnected():
         try:
             async with SessionLocal() as event_db:
@@ -1138,6 +1153,7 @@ async def _agent_run_event_stream(
         run = snapshot.run if snapshot is not None else None
         if (
             run is not None
+            and run.run_attempt_id == attempt_id
             and run.progress_stage is not None
             and run.progress_message is not None
             and run.progress_updated_at is not None
@@ -1151,15 +1167,12 @@ async def _agent_run_event_stream(
                     if run.progress_stage == models.AgentRunProgressStage.FAILED.value
                     else "progress"
                 )
-                if (
-                    last_progress is None
-                    and event in {"complete", "failed"}
-                    and asyncio.get_running_loop().time() < terminal_grace_deadline
-                ):
-                    await asyncio.sleep(poll_interval_seconds)
-                    continue
                 payload = json.dumps(
-                    {"stage": run.progress_stage, "message": run.progress_message},
+                    {
+                        "attempt_id": str(attempt_id),
+                        "stage": run.progress_stage,
+                        "message": run.progress_message,
+                    },
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )

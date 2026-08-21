@@ -305,16 +305,20 @@ export default function InvestigationDetailPage() {
     setLiveProgressDisconnected(false);
 
     const encodedId = encodeURIComponent(investigationId);
+    const attemptId = crypto.randomUUID();
     const progressSource = new EventSource(
-      `${API_BASE_URL}/investigations/${encodedId}/agent-run/events`,
+      `${API_BASE_URL}/investigations/${encodedId}/agent-run/events?attempt_id=${encodeURIComponent(attemptId)}`,
       { withCredentials: true },
     );
     progressSourceRef.current = progressSource;
 
     const receiveProgress = (event: MessageEvent<string>) => {
       try {
-        const progress = JSON.parse(event.data) as Partial<AgentRunProgress>;
+        const progress = JSON.parse(event.data) as Partial<
+          AgentRunProgress & { attempt_id: string }
+        >;
         if (
+          progress.attempt_id !== attemptId ||
           typeof progress.stage !== "string" ||
           !isAgentRunProgressStage(progress.stage) ||
           typeof progress.message !== "string"
@@ -368,7 +372,12 @@ export default function InvestigationDetailPage() {
     try {
       const response = await fetch(
         `${API_BASE_URL}/investigations/${encodedId}/agent-run`,
-        { method: "POST", credentials: "include" },
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ attempt_id: attemptId }),
+        },
       );
       const body = (await response.json().catch(() => null)) as
         | AgentRunStatus

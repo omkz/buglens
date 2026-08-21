@@ -64,6 +64,7 @@ class PersistedAgentRun:
     progress_stage: str | None = None
     progress_message: str | None = None
     progress_updated_at: datetime | None = None
+    run_attempt_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,7 @@ async def claim_agent_run(
     installation_id: uuid.UUID,
     investigation_id: uuid.UUID,
     agent_model: str,
+    attempt_id: uuid.UUID,
 ) -> AgentRunClaim:
     """Authorize and atomically claim the one current run row."""
     row = (
@@ -184,6 +186,7 @@ async def claim_agent_run(
             progress_stage=models.AgentRunProgressStage.STARTING.value,
             progress_message="Starting investigation…",
             progress_updated_at=started_at,
+            run_attempt_id=attempt_id,
             started_at=started_at,
             completed_at=None,
         )
@@ -208,6 +211,7 @@ async def claim_agent_run(
         run.progress_stage = models.AgentRunProgressStage.STARTING.value
         run.progress_message = "Starting investigation…"
         run.progress_updated_at = started_at
+        run.run_attempt_id = attempt_id
         run.started_at = started_at
         run.completed_at = None
     await db.flush()
@@ -304,6 +308,7 @@ async def update_agent_run_progress(
     db: AsyncSession,
     *,
     investigation_id: uuid.UUID,
+    attempt_id: uuid.UUID,
     stage: models.AgentRunProgressStage,
     message: str,
 ) -> None:
@@ -312,6 +317,7 @@ async def update_agent_run_progress(
         update(models.InvestigationAgentRun)
         .where(
             models.InvestigationAgentRun.investigation_id == investigation_id,
+            models.InvestigationAgentRun.run_attempt_id == attempt_id,
             models.InvestigationAgentRun.status == models.AgentRunStatus.RUNNING.value,
         )
         .values(
@@ -511,6 +517,7 @@ def _to_persisted(run: models.InvestigationAgentRun) -> PersistedAgentRun:
         progress_stage=run.progress_stage,
         progress_message=run.progress_message,
         progress_updated_at=run.progress_updated_at,
+        run_attempt_id=run.run_attempt_id,
     )
 
 

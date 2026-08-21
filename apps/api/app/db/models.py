@@ -353,6 +353,7 @@ class InvestigationAgentRun(Base):
     progress_stage: Mapped[str | None]
     progress_message: Mapped[str | None] = mapped_column(Text)
     progress_updated_at: Mapped[datetime | None]
+    run_attempt_id: Mapped[uuid.UUID | None]
     started_at: Mapped[datetime]
     completed_at: Mapped[datetime | None]
     created_at: Mapped[CreatedAt]

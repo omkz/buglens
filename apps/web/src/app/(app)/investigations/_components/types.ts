@@ -90,6 +90,7 @@ export type AgentRunResult = {
 
 export type AgentRunStatus = {
   investigation_id: string;
+  attempt_id: string | null;
   status: "running" | "completed" | "failed" | null;
   result: AgentRunResult | null;
   progress: AgentRunProgress | null;

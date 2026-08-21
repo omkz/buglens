@@ -519,11 +519,13 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 )
                 await db.rollback()
 
+                first_attempt_id = uuid.uuid4()
                 inaccessible_run = await claim_agent_run(
                     db,
                     installation_id=second_connection.installation_id,
                     investigation_id=first_investigation.id,
                     agent_model="gemini-test-model",
+                    attempt_id=first_attempt_id,
                 )
                 assert inaccessible_run.state == AgentRunClaimState.NOT_FOUND
 
@@ -532,6 +534,7 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                     installation_id=first_connection.installation_id,
                     investigation_id=first_investigation.id,
                     agent_model="gemini-test-model",
+                    attempt_id=first_attempt_id,
                 )
                 assert agent_claim.state == AgentRunClaimState.READY
                 assert agent_claim.context is not None
@@ -546,10 +549,12 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert running_snapshot.run.progress_stage == "starting"
                 assert running_snapshot.run.progress_message == "Starting investigation…"
                 assert running_snapshot.run.progress_updated_at is not None
+                assert running_snapshot.run.run_attempt_id == first_attempt_id
 
                 await update_agent_run_progress(
                     db,
                     investigation_id=first_investigation.id,
+                    attempt_id=first_attempt_id,
                     stage=models.AgentRunProgressStage.INVESTIGATING_REPOSITORY,
                     message="Inspecting repository…",
                 )
@@ -560,6 +565,7 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                     installation_id=first_connection.installation_id,
                     investigation_id=first_investigation.id,
                     agent_model="gemini-test-model",
+                    attempt_id=uuid.uuid4(),
                 )
                 assert concurrent_claim.state == AgentRunClaimState.CONFLICT
                 await db.rollback()
@@ -591,6 +597,7 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 await update_agent_run_progress(
                     db,
                     investigation_id=first_investigation.id,
+                    attempt_id=first_attempt_id,
                     stage=models.AgentRunProgressStage.RUNNING_BROWSER,
                     message="Running browser reproduction…",
                 )
@@ -612,11 +619,13 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                     == GitHubIssueClaimState.NO_COMPLETED_RUN
                 )
                 await db.rollback()
+                retry_attempt_id = uuid.uuid4()
                 retry_run = await claim_agent_run(
                     db,
                     installation_id=first_connection.installation_id,
                     investigation_id=first_investigation.id,
                     agent_model="gemini-test-model",
+                    attempt_id=retry_attempt_id,
                 )
                 assert retry_run.state == AgentRunClaimState.READY
                 await db.commit()
@@ -628,6 +637,23 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert retry_snapshot.run is not None
                 assert retry_snapshot.run.progress_stage == "starting"
                 assert retry_snapshot.run.progress_message == "Starting investigation…"
+                assert retry_snapshot.run.run_attempt_id == retry_attempt_id
+                assert retry_snapshot.run.run_attempt_id != first_attempt_id
+                await update_agent_run_progress(
+                    db,
+                    investigation_id=first_investigation.id,
+                    attempt_id=first_attempt_id,
+                    stage=models.AgentRunProgressStage.RUNNING_BROWSER,
+                    message="Old attempt must not update this run.",
+                )
+                await db.commit()
+                attempt_scoped_snapshot = await get_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert attempt_scoped_snapshot.run is not None
+                assert attempt_scoped_snapshot.run.progress_stage == "starting"
                 persisted_run = await complete_agent_run(
                     db,
                     investigation_id=first_investigation.id,
