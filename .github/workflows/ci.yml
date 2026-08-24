@@ -40,6 +40,70 @@ jobs:
       - name: Check application import
         run: uv run python -c "from app.main import app; assert app.title == 'BugLens API'"
 
+  api-container:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build API production image
+        run: docker build -t buglens-api:ci apps/api
+
+      - name: Verify non-root runtime user
+        run: |
+          docker run --rm \
+            --entrypoint sh \
+            buglens-api:ci \
+            -c 'test "$(id -u)" = "10001"'
+
+      - name: Launch Playwright Chromium as non-root
+        run: |
+          docker run --rm \
+            --entrypoint python \
+            buglens-api:ci \
+            -c '
+          from playwright.sync_api import sync_playwright
+
+          with sync_playwright() as playwright:
+              browser = playwright.chromium.launch(headless=True)
+              print(browser.version)
+              browser.close()
+          '
+
+      - name: Start API container on Cloud Run port
+        run: |
+          docker run -d \
+            --name buglens-api-ci \
+            -e PORT=8091 \
+            -e SESSION_SECRET=ci-only-session-secret \
+            -p 127.0.0.1:8091:8091 \
+            buglens-api:ci
+
+      - name: Wait for API health
+        run: |
+          for _ in {1..20}; do
+            if response="$(curl --fail --silent --show-error http://127.0.0.1:8091/health)"; then
+              if [ "$response" = '{"status":"ok"}' ]; then
+                exit 0
+              fi
+            fi
+
+            if [ "$(docker inspect --format='{{.State.Running}}' buglens-api-ci)" != "true" ]; then
+              docker logs buglens-api-ci || true
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          docker logs buglens-api-ci || true
+          exit 1
+
+      - name: Remove API container
+        if: always()
+        run: docker rm -f buglens-api-ci >/dev/null 2>&1 || true
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
