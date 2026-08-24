@@ -17,10 +17,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import get_settings
 from app.integrations.github.repository import PersistedGitHubConnection
 from app.investigations.evidence_storage import (
-    EvidenceStorage,
+    EvidenceContent,
     EvidenceStorageError,
     EmptyRecordingError,
+    LocalEvidenceStorage,
     RecordingTooLargeError,
+    StoredRecording,
 )
 from app.investigations.repository import PersistedEvidence, PersistedInvestigation
 
@@ -77,7 +79,7 @@ def _connected_client(monkeypatch, tmp_path: Path, *, max_bytes: int = 1024):
 
     connection = _connection()
     investigation = _investigation()
-    storage = EvidenceStorage(tmp_path)
+    storage = LocalEvidenceStorage(tmp_path)
     settings = get_settings().model_copy(
         update={
             "evidence_storage_dir": tmp_path,
@@ -100,6 +102,37 @@ def _connected_client(monkeypatch, tmp_path: Path, *, max_bytes: int = 1024):
         "buglens_session", _signed_session_cookie(str(connection.connection_id))
     )
     return client, app, routes, connection, investigation, storage
+
+
+class FakeEvidenceStorage:
+    def __init__(self, content: bytes = b""):
+        self.content = content
+        self.saved = []
+        self.opened = []
+        self.deleted = []
+
+    async def save_recording(self, upload, **kwargs):
+        self.saved.append((upload, kwargs))
+        extension = ".mp4" if kwargs["mime_type"] == "video/mp4" else ".webm"
+        return StoredRecording(
+            storage_key=(
+                f'{kwargs["investigation_id"]}/{kwargs["evidence_id"]}{extension}'
+            ),
+            size_bytes=len(self.content),
+        )
+
+    async def open_content(self, storage_key):
+        self.opened.append(storage_key)
+
+        async def chunks():
+            midpoint = len(self.content) // 2
+            yield self.content[:midpoint]
+            yield self.content[midpoint:]
+
+        return EvidenceContent(chunks=chunks())
+
+    async def delete(self, storage_key):
+        self.deleted.append(storage_key)
 
 
 def test_authenticated_recording_and_logs_are_persisted_together(
@@ -139,6 +172,32 @@ def test_authenticated_recording_and_logs_are_persisted_together(
     assert recording.size_bytes == len(b"webm-data")
     assert recording.storage_key.startswith(f"{investigation.id}/")
     assert (tmp_path / recording.storage_key).read_bytes() == b"webm-data"
+
+
+def test_recording_route_uses_backend_neutral_storage(monkeypatch, tmp_path):
+    client, app, routes, _connection_value, investigation, _storage = (
+        _connected_client(monkeypatch, tmp_path)
+    )
+    storage = FakeEvidenceStorage(b"fake-video")
+    app.dependency_overrides[routes.get_evidence_storage] = lambda: storage
+
+    async def persist(db, **kwargs):
+        return _persisted_from_drafts(investigation.id, kwargs["items"])
+
+    monkeypatch.setattr(routes, "create_evidence_items", persist)
+    try:
+        response = client.post(
+            f"/investigations/{investigation.id}/evidence",
+            files={"recording": ("recording.mp4", b"ignored", "video/mp4")},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 201
+    assert len(storage.saved) == 1
+    assert storage.saved[0][1]["investigation_id"] == investigation.id
+    assert response.json()["evidence"][0]["size_bytes"] == len(b"fake-video")
+    assert list(tmp_path.rglob("*")) == []
 
 
 def test_logs_can_be_saved_without_recording(monkeypatch, tmp_path):
@@ -370,9 +429,9 @@ def test_recording_content_is_scoped_before_file_resolution(monkeypatch, tmp_pat
     client, app, routes, connection, investigation, storage = (
         _connected_client(monkeypatch, tmp_path)
     )
-    resolve = Mock()
+    open_content = Mock()
     captured = {}
-    monkeypatch.setattr(storage, "resolve_content", resolve)
+    monkeypatch.setattr(storage, "open_content", open_content)
 
     async def inaccessible(db, **kwargs):
         captured.update(kwargs)
@@ -390,7 +449,7 @@ def test_recording_content_is_scoped_before_file_resolution(monkeypatch, tmp_pat
     assert response.json() == {"detail": "Evidence not found."}
     assert captured["installation_id"] == connection.installation_id
     assert captured["investigation_id"] == investigation.id
-    resolve.assert_not_called()
+    open_content.assert_not_called()
 
 
 def test_recording_content_streams_with_persisted_mime_type(monkeypatch, tmp_path):
@@ -399,9 +458,8 @@ def test_recording_content_streams_with_persisted_mime_type(monkeypatch, tmp_pat
     )
     evidence_id = uuid.uuid4()
     storage_key = f"{investigation.id}/{evidence_id}.webm"
-    path = tmp_path / storage_key
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b"video bytes")
+    fake_storage = FakeEvidenceStorage(b"video bytes")
+    app.dependency_overrides[routes.get_evidence_storage] = lambda: fake_storage
     item = PersistedEvidence(
         id=evidence_id,
         investigation_id=investigation.id,
@@ -427,7 +485,50 @@ def test_recording_content_streams_with_persisted_mime_type(monkeypatch, tmp_pat
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "video/webm"
+    assert response.headers["content-length"] == "11"
+    assert "content-disposition" not in response.headers
     assert response.content == b"video bytes"
+    assert fake_storage.opened == [storage_key]
+
+
+def test_missing_recording_content_returns_safe_storage_error(monkeypatch, tmp_path):
+    client, app, routes, _connection_value, investigation, storage = (
+        _connected_client(monkeypatch, tmp_path)
+    )
+    evidence_id = uuid.uuid4()
+    item = PersistedEvidence(
+        id=evidence_id,
+        investigation_id=investigation.id,
+        kind="recording",
+        mime_type="video/webm",
+        filename="recording.webm",
+        storage_key=f"{investigation.id}/{evidence_id}.webm",
+        size_bytes=10,
+        text_content=None,
+        created_at=datetime(2026, 8, 16, tzinfo=timezone.utc),
+    )
+
+    async def scoped_recording(*args, **kwargs):
+        return item
+
+    async def unavailable(_storage_key):
+        raise EvidenceStorageError("Evidence content is unavailable.")
+
+    monkeypatch.setattr(routes, "get_recording_evidence", scoped_recording)
+    monkeypatch.setattr(storage, "open_content", unavailable)
+    monkeypatch.setattr(routes, "logger", Mock())
+    try:
+        response = client.get(
+            f"/investigations/{investigation.id}/evidence/{evidence_id}/content"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Evidence storage is temporarily unavailable."
+    }
+    assert str(tmp_path) not in response.text
 
 
 def test_evidence_creation_requires_a_signed_connection():
@@ -443,7 +544,7 @@ def test_evidence_creation_requires_a_signed_connection():
 
 @pytest.mark.anyio
 async def test_storage_adapter_rejects_empty_and_oversized_uploads(tmp_path):
-    storage = EvidenceStorage(tmp_path)
+    storage = LocalEvidenceStorage(tmp_path)
     investigation_id = uuid.uuid4()
 
     with pytest.raises(EmptyRecordingError):
@@ -464,3 +565,98 @@ async def test_storage_adapter_rejects_empty_and_oversized_uploads(tmp_path):
         )
     assert not list(tmp_path.rglob("*.part"))
     assert not list(tmp_path.rglob("*.webm"))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("mime_type", "extension"),
+    [("video/webm", ".webm"), ("video/mp4", ".mp4")],
+)
+async def test_local_storage_saves_recording_with_unchanged_key_format(
+    tmp_path, mime_type, extension
+):
+    storage = LocalEvidenceStorage(tmp_path)
+    investigation_id = uuid.uuid4()
+    evidence_id = uuid.uuid4()
+
+    stored = await storage.save_recording(
+        UploadFile(filename=f"recording{extension}", file=BytesIO(b"video-data")),
+        investigation_id=investigation_id,
+        evidence_id=evidence_id,
+        mime_type=mime_type,
+        max_bytes=100,
+    )
+
+    assert stored == StoredRecording(
+        storage_key=f"{investigation_id}/{evidence_id}{extension}",
+        size_bytes=10,
+    )
+    assert (tmp_path / stored.storage_key).read_bytes() == b"video-data"
+
+
+@pytest.mark.anyio
+async def test_local_storage_cleans_partial_file_after_upload_failure(tmp_path):
+    storage = LocalEvidenceStorage(tmp_path)
+
+    class FailingUpload:
+        calls = 0
+
+        async def read(self, _size):
+            self.calls += 1
+            if self.calls == 1:
+                return b"partial"
+            raise RuntimeError("upload interrupted")
+
+    with pytest.raises(EvidenceStorageError, match="Unable to store evidence"):
+        await storage.save_recording(
+            FailingUpload(),
+            investigation_id=uuid.uuid4(),
+            evidence_id=uuid.uuid4(),
+            mime_type="video/webm",
+            max_bytes=100,
+        )
+
+    assert not list(tmp_path.rglob("*.part"))
+    assert not list(tmp_path.rglob("*.webm"))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("storage_key", ["../secret.webm", "/tmp/secret.webm"])
+async def test_local_storage_rejects_traversal(storage_key, tmp_path):
+    storage = LocalEvidenceStorage(tmp_path)
+
+    with pytest.raises(EvidenceStorageError, match="Invalid evidence storage key"):
+        await storage.open_content(storage_key)
+    with pytest.raises(EvidenceStorageError, match="Invalid evidence storage key"):
+        await storage.delete(storage_key)
+
+
+@pytest.mark.anyio
+async def test_local_storage_deletes_content_and_reports_missing_content(tmp_path):
+    storage = LocalEvidenceStorage(tmp_path)
+    path = tmp_path / "investigation" / "recording.webm"
+    path.parent.mkdir()
+    path.write_bytes(b"video")
+
+    await storage.delete("investigation/recording.webm")
+
+    assert not path.exists()
+    with pytest.raises(
+        EvidenceStorageError, match="Evidence content is unavailable"
+    ):
+        await storage.open_content("investigation/recording.webm")
+
+
+@pytest.mark.anyio
+async def test_local_storage_streams_content_in_chunks(monkeypatch, tmp_path):
+    from app.investigations import evidence_storage
+
+    monkeypatch.setattr(evidence_storage, "_CHUNK_SIZE", 3)
+    storage = LocalEvidenceStorage(tmp_path)
+    path = tmp_path / "investigation" / "recording.webm"
+    path.parent.mkdir()
+    path.write_bytes(b"abcdefgh")
+
+    content = await storage.open_content("investigation/recording.webm")
+
+    assert [chunk async for chunk in content.chunks] == [b"abc", b"def", b"gh"]

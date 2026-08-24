@@ -1,11 +1,13 @@
-"""Replaceable local filesystem storage for Investigation recordings."""
+"""Backend-neutral storage for investigation recordings."""
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import AsyncContextManager, BinaryIO, Protocol
 
 import anyio
 from fastapi import UploadFile
@@ -18,7 +20,7 @@ _EXTENSIONS = {
 
 
 class EvidenceStorageError(RuntimeError):
-    """Raised when local evidence storage cannot complete an operation."""
+    """Raised when evidence storage cannot complete an operation."""
 
 
 class EmptyRecordingError(EvidenceStorageError):
@@ -35,7 +37,30 @@ class StoredRecording:
     size_bytes: int
 
 
-class EvidenceStorage:
+@dataclass(frozen=True)
+class EvidenceContent:
+    chunks: AsyncIterator[bytes]
+
+
+class EvidenceStorage(Protocol):
+    async def save_recording(
+        self,
+        upload: UploadFile,
+        *,
+        investigation_id: uuid.UUID,
+        evidence_id: uuid.UUID,
+        mime_type: str,
+        max_bytes: int,
+    ) -> StoredRecording: ...
+
+    async def delete(self, storage_key: str) -> None: ...
+
+    async def open_content(self, storage_key: str) -> EvidenceContent: ...
+
+    def materialize(self, storage_key: str) -> AsyncContextManager[Path]: ...
+
+
+class LocalEvidenceStorage:
     def __init__(self, root: Path):
         self.root = root.resolve()
 
@@ -50,7 +75,7 @@ class EvidenceStorage:
     ) -> StoredRecording:
         extension = _EXTENSIONS[mime_type.split(";", 1)[0]]
         storage_key = f"{investigation_id}/{evidence_id}{extension}"
-        target = self._resolve_key(storage_key)
+        target = await anyio.to_thread.run_sync(self._resolve_key, storage_key)
         partial = target.with_suffix(f"{target.suffix}.part")
         writer: BinaryIO | None = None
         size_bytes = 0
@@ -84,13 +109,34 @@ class EvidenceStorage:
         return StoredRecording(storage_key=storage_key, size_bytes=size_bytes)
 
     async def delete(self, storage_key: str) -> None:
-        await self._delete_path(self._resolve_key(storage_key))
+        path = await anyio.to_thread.run_sync(self._resolve_key, storage_key)
+        await self._delete_path(path)
 
-    def resolve_content(self, storage_key: str) -> Path:
-        path = self._resolve_key(storage_key)
-        if not path.is_file():
+    async def open_content(self, storage_key: str) -> EvidenceContent:
+        path = await self._content_path(storage_key)
+        return EvidenceContent(chunks=self._stream_path(path))
+
+    @asynccontextmanager
+    async def materialize(self, storage_key: str) -> AsyncIterator[Path]:
+        yield await self._content_path(storage_key)
+
+    async def _content_path(self, storage_key: str) -> Path:
+        path = await anyio.to_thread.run_sync(self._resolve_key, storage_key)
+        if not await anyio.to_thread.run_sync(path.is_file):
             raise EvidenceStorageError("Evidence content is unavailable.")
         return path
+
+    async def _stream_path(self, path: Path) -> AsyncIterator[bytes]:
+        reader: BinaryIO | None = None
+        try:
+            reader = await anyio.to_thread.run_sync(lambda: path.open("rb"))
+            while chunk := await anyio.to_thread.run_sync(reader.read, _CHUNK_SIZE):
+                yield chunk
+        except OSError as exc:
+            raise EvidenceStorageError("Unable to read evidence.") from exc
+        finally:
+            if reader is not None:
+                await anyio.to_thread.run_sync(reader.close)
 
     def _resolve_key(self, storage_key: str) -> Path:
         candidate = (self.root / storage_key).resolve()

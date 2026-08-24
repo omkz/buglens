@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
@@ -83,7 +84,7 @@ class AnalyzerProviderError(RuntimeError):
 
 
 class AnalyzerEvidenceError(RuntimeError):
-    """Raised when trusted local evidence cannot be resolved."""
+    """Raised when trusted recording evidence cannot be prepared."""
 
 
 class InvestigationAnalyzerService:
@@ -104,7 +105,7 @@ class InvestigationAnalyzerService:
     ) -> BugAnalysis:
         logs: list[str] = []
         recordings: list[RecordingEvidence] = []
-        try:
+        async with AsyncExitStack() as stack:
             for item in evidence:
                 if item.kind == "logs" and item.text_content is not None:
                     logs.append(item.text_content)
@@ -113,20 +114,24 @@ class InvestigationAnalyzerService:
                         raise AnalyzerEvidenceError(
                             "Recording metadata has no storage key."
                         )
-                    recordings.append(
-                        RecordingEvidence(
-                            path=self.storage.resolve_content(item.storage_key),
-                            mime_type=(item.mime_type or "video/webm").split(";", 1)[0],
+                    try:
+                        path = await stack.enter_async_context(
+                            self.storage.materialize(item.storage_key)
                         )
+                    except EvidenceStorageError as exc:
+                        raise AnalyzerEvidenceError(
+                            "Recording evidence is unavailable."
+                        ) from exc
+                    mime_type = (item.mime_type or "video/webm").split(";", 1)[0]
+                    recordings.append(
+                        RecordingEvidence(path=path, mime_type=mime_type)
                     )
-        except EvidenceStorageError as exc:
-            raise AnalyzerEvidenceError("Recording evidence is unavailable.") from exc
 
-        return await self.analyzer.analyze(
-            AnalysisInput(
-                title=investigation.title,
-                description=investigation.description,
-                logs=logs,
-                recordings=recordings,
+            return await self.analyzer.analyze(
+                AnalysisInput(
+                    title=investigation.title,
+                    description=investigation.description,
+                    logs=logs,
+                    recordings=recordings,
+                )
             )
-        )

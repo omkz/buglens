@@ -22,7 +22,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,6 +83,7 @@ from .evidence_storage import (
     EmptyRecordingError,
     EvidenceStorage,
     EvidenceStorageError,
+    LocalEvidenceStorage,
     RecordingTooLargeError,
 )
 from .gemini import GeminiBugAnalyzer
@@ -204,7 +205,7 @@ class GitHubIssuePublicationResponse(BaseModel):
 def get_evidence_storage(
     settings: Settings = Depends(get_settings),
 ) -> EvidenceStorage:
-    return EvidenceStorage(settings.evidence_storage_dir)
+    return LocalEvidenceStorage(settings.evidence_storage_dir)
 
 
 def get_bug_analyzer(settings: Settings = Depends(get_settings)) -> BugAnalyzer:
@@ -507,7 +508,7 @@ async def get_investigation_evidence(
 
 @router.get(
     "/investigations/{investigation_id}/evidence/{evidence_id}/content",
-    response_class=FileResponse,
+    response_class=StreamingResponse,
 )
 async def get_investigation_evidence_content(
     investigation_id: uuid.UUID,
@@ -515,7 +516,7 @@ async def get_investigation_evidence_content(
     request: Request,
     storage: EvidenceStorage = Depends(get_evidence_storage),
     db: AsyncSession = Depends(get_db),
-) -> FileResponse:
+) -> StreamingResponse:
     connection = await _require_connection(request, db)
     try:
         evidence = await get_recording_evidence(
@@ -539,7 +540,7 @@ async def get_investigation_evidence_content(
         raise HTTPException(status_code=404, detail="Evidence not found.")
 
     try:
-        path = storage.resolve_content(evidence.storage_key)
+        content = await storage.open_content(evidence.storage_key)
     except EvidenceStorageError:
         logger.exception(
             "evidence_storage_read_failed",
@@ -550,7 +551,16 @@ async def get_investigation_evidence_content(
             status_code=503,
             detail="Evidence storage is temporarily unavailable.",
         ) from None
-    return FileResponse(path, media_type=evidence.mime_type or "video/webm")
+    headers = (
+        {"content-length": str(evidence.size_bytes)}
+        if evidence.size_bytes is not None
+        else None
+    )
+    return StreamingResponse(
+        content.chunks,
+        media_type=evidence.mime_type or "video/webm",
+        headers=headers,
+    )
 
 
 @router.post(

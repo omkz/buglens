@@ -21,7 +21,7 @@ from app.investigations.analyzer import (
     BugAnalysis,
     InvestigationAnalyzerService,
 )
-from app.investigations.evidence_storage import EvidenceStorage
+from app.investigations.evidence_storage import LocalEvidenceStorage
 from app.investigations.gemini import GeminiBugAnalyzer
 from app.investigations.repository import (
     AnalysisClaim,
@@ -373,7 +373,7 @@ async def test_analysis_service_passes_logs_and_resolves_recordings_server_side(
             return _analysis()
 
     analyzer = CapturingAnalyzer()
-    service = InvestigationAnalyzerService(analyzer, EvidenceStorage(tmp_path))
+    service = InvestigationAnalyzerService(analyzer, LocalEvidenceStorage(tmp_path))
 
     result = await service.analyze(investigation, [logs, recording])
 
