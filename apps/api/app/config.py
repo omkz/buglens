@@ -24,8 +24,8 @@ class Settings(DatabaseSettings):
     github_client_secret: str = ""
 
     frontend_base_url: str = "http://localhost:3000"
-    backend_base_url: str = "http://localhost:8000"
-    github_callback_url: str = "http://localhost:8000/github/oauth/callback"
+    backend_base_url: str = "http://localhost:3000/api"
+    github_callback_url: str = "http://localhost:3000/api/github/oauth/callback"
 
     log_level: str = "INFO"
     log_format: str = "console"

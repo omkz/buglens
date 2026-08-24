@@ -108,7 +108,7 @@ def test_create_project_requires_session():
     from app.main import app
 
     response = TestClient(app).post(
-        "/projects", json={"name": "Demo", "github_repository_id": 123}
+        "/api/projects", json={"name": "Demo", "github_repository_id": 123}
     )
 
     assert response.status_code == 401
@@ -123,7 +123,7 @@ def test_create_project_rejects_malformed_connection_id():
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie("not-a-uuid"))
     response = client.post(
-        "/projects", json={"name": "Demo", "github_repository_id": 123}
+        "/api/projects", json={"name": "Demo", "github_repository_id": 123}
     )
 
     assert response.status_code == 401
@@ -143,7 +143,7 @@ def test_create_project_rejects_missing_persisted_connection(monkeypatch):
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie(str(uuid.uuid4())))
     response = client.post(
-        "/projects", json={"name": "Demo", "github_repository_id": 123}
+        "/api/projects", json={"name": "Demo", "github_repository_id": 123}
     )
 
     assert response.status_code == 401
@@ -154,7 +154,7 @@ def test_create_project_does_not_accept_browser_installation_id(monkeypatch):
     client = _connected_client(monkeypatch, _connection())
 
     response = client.post(
-        "/projects",
+        "/api/projects",
         json={
             "name": "Demo",
             "github_repository_id": 123,
@@ -186,7 +186,7 @@ def test_create_project_validates_repository_and_uses_trusted_metadata(monkeypat
     client = _connected_client(monkeypatch, connection)
 
     response = client.post(
-        "/projects",
+        "/api/projects",
         json={
             "name": "Checkout Demo",
             "github_repository_id": 123,
@@ -229,7 +229,7 @@ def test_create_project_rejects_inaccessible_repository(monkeypatch):
     client = _connected_client(monkeypatch, _connection())
 
     response = client.post(
-        "/projects", json={"name": "Demo", "github_repository_id": 123}
+        "/api/projects", json={"name": "Demo", "github_repository_id": 123}
     )
 
     assert response.status_code == 404
@@ -253,7 +253,7 @@ def test_duplicate_repository_returns_conflict(monkeypatch):
     client = _connected_client(monkeypatch, _connection())
 
     response = client.post(
-        "/projects", json={"name": "Demo", "github_repository_id": 123}
+        "/api/projects", json={"name": "Demo", "github_repository_id": 123}
     )
 
     assert response.status_code == 409
@@ -277,7 +277,7 @@ def test_project_connection_database_failure_returns_safe_503(monkeypatch):
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie(str(uuid.uuid4())))
 
-    response = client.get("/projects")
+    response = client.get("/api/projects")
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Projects are temporarily unavailable."}
@@ -302,7 +302,7 @@ def test_project_persistence_database_failure_returns_safe_503(monkeypatch):
     client = _connected_client(monkeypatch, connection)
 
     response = client.post(
-        "/projects", json={"name": "Demo", "github_repository_id": 123}
+        "/api/projects", json={"name": "Demo", "github_repository_id": 123}
     )
 
     assert response.status_code == 503
@@ -328,7 +328,7 @@ def test_github_validation_failure_returns_safe_502(monkeypatch):
     client = _connected_client(monkeypatch, connection)
 
     response = client.post(
-        "/projects", json={"name": "Demo", "github_repository_id": 123}
+        "/api/projects", json={"name": "Demo", "github_repository_id": 123}
     )
 
     assert response.status_code == 502
@@ -361,7 +361,7 @@ def test_get_projects_scopes_to_current_installation(monkeypatch):
     monkeypatch.setattr(routes, "load_projects", scoped_list)
     client = _connected_client(monkeypatch, connection)
 
-    response = client.get("/projects?installation_id=999999")
+    response = client.get("/api/projects?installation_id=999999")
 
     assert response.status_code == 200
     assert captured["installation_id"] == connection.installation_id

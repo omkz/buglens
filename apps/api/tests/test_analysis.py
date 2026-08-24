@@ -201,7 +201,7 @@ def test_analysis_preconditions_are_enforced(
 
     monkeypatch.setattr(routes, "claim_analysis", claim)
     try:
-        response = client.post(f"/investigations/{uuid.uuid4()}/analyze")
+        response = client.post(f"/api/investigations/{uuid.uuid4()}/analyze")
     finally:
         app.dependency_overrides.clear()
 
@@ -234,7 +234,7 @@ def test_analysis_is_scoped_and_persists_structured_result(monkeypatch):
     monkeypatch.setattr(routes, "complete_analysis", complete)
     try:
         response = client.post(
-            f"/investigations/{investigation.id}/analyze",
+            f"/api/investigations/{investigation.id}/analyze",
             json={
                 "installation_id": str(uuid.uuid4()),
                 "storage_key": "/tmp/browser-controlled.webm",
@@ -295,7 +295,7 @@ def test_analysis_failure_is_safe_and_marks_investigation_failed(
     monkeypatch.setattr(routes, "claim_analysis", claim)
     monkeypatch.setattr(routes, "mark_analysis_failed", mark_failed)
     try:
-        response = client.post(f"/investigations/{investigation.id}/analyze")
+        response = client.post(f"/api/investigations/{investigation.id}/analyze")
     finally:
         app.dependency_overrides.clear()
 
@@ -331,7 +331,7 @@ def test_materialization_exit_failure_returns_safe_503_and_marks_failed(
     monkeypatch.setattr(routes, "claim_analysis", claim)
     monkeypatch.setattr(routes, "mark_analysis_failed", mark_failed)
     try:
-        response = client.post(f"/investigations/{investigation.id}/analyze")
+        response = client.post(f"/api/investigations/{investigation.id}/analyze")
     finally:
         app.dependency_overrides.clear()
 
@@ -364,7 +364,7 @@ def test_failed_analysis_can_be_retried_without_duplicate_result(monkeypatch):
     monkeypatch.setattr(routes, "claim_analysis", retry_claim)
     monkeypatch.setattr(routes, "complete_analysis", upsert)
     try:
-        response = client.post(f"/investigations/{investigation.id}/analyze")
+        response = client.post(f"/api/investigations/{investigation.id}/analyze")
     finally:
         app.dependency_overrides.clear()
 
@@ -384,7 +384,7 @@ def test_get_analysis_returns_stable_pending_shape_and_is_scoped(monkeypatch):
 
     monkeypatch.setattr(routes, "load_analysis", load)
     try:
-        response = client.get(f"/investigations/{investigation_id}/analysis")
+        response = client.get(f"/api/investigations/{investigation_id}/analysis")
     finally:
         app.dependency_overrides.clear()
 
@@ -409,7 +409,7 @@ def test_other_installation_cannot_read_analysis(monkeypatch):
 
     monkeypatch.setattr(routes, "load_analysis", inaccessible)
     try:
-        response = client.get(f"/investigations/{uuid.uuid4()}/analysis")
+        response = client.get(f"/api/investigations/{uuid.uuid4()}/analysis")
     finally:
         app.dependency_overrides.clear()
 

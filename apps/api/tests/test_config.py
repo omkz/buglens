@@ -47,6 +47,12 @@ def test_database_pool_and_local_development_defaults(monkeypatch):
     assert settings.evidence_storage_backend == "local"
     assert str(settings.evidence_storage_dir) == ".data/evidence"
     assert settings.playwright_allow_private_network is False
+    assert settings.frontend_base_url == "http://localhost:3000"
+    assert settings.backend_base_url == "http://localhost:3000/api"
+    assert (
+        settings.github_callback_url
+        == "http://localhost:3000/api/github/oauth/callback"
+    )
 
 
 @pytest.mark.parametrize(

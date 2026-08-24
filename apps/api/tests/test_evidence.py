@@ -150,7 +150,7 @@ def test_authenticated_recording_and_logs_are_persisted_together(
     monkeypatch.setattr(routes, "create_evidence_items", persist)
     try:
         response = client.post(
-            f"/investigations/{investigation.id}/evidence",
+            f"/api/investigations/{investigation.id}/evidence",
             files={"recording": ("recording.webm", b"webm-data", "video/webm")},
             data={"logs": "Console error at checkout"},
         )
@@ -187,7 +187,7 @@ def test_recording_route_uses_backend_neutral_storage(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "create_evidence_items", persist)
     try:
         response = client.post(
-            f"/investigations/{investigation.id}/evidence",
+            f"/api/investigations/{investigation.id}/evidence",
             files={"recording": ("recording.mp4", b"ignored", "video/mp4")},
         )
     finally:
@@ -211,7 +211,7 @@ def test_logs_can_be_saved_without_recording(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "create_evidence_items", persist)
     try:
         response = client.post(
-            f"/investigations/{investigation.id}/evidence",
+            f"/api/investigations/{investigation.id}/evidence",
             data={"logs": "plain text only"},
         )
     finally:
@@ -251,7 +251,7 @@ def test_invalid_evidence_inputs_are_rejected(
     )
     try:
         response = client.post(
-            f"/investigations/{investigation.id}/evidence", files=files
+            f"/api/investigations/{investigation.id}/evidence", files=files
         )
     finally:
         app.dependency_overrides.clear()
@@ -277,7 +277,7 @@ def test_storage_filename_is_generated_and_path_traversal_is_ignored(
     monkeypatch.setattr(routes, "create_evidence_items", persist)
     try:
         response = client.post(
-            f"/investigations/{investigation.id}/evidence",
+            f"/api/investigations/{investigation.id}/evidence",
             files={
                 "recording": (
                     "../../private/recording.webm",
@@ -308,7 +308,7 @@ def test_inaccessible_investigation_returns_404_before_storage(monkeypatch, tmp_
     monkeypatch.setattr(routes, "load_investigation", inaccessible)
     try:
         response = client.post(
-            f"/investigations/{investigation.id}/evidence",
+            f"/api/investigations/{investigation.id}/evidence",
             files={"recording": ("recording.webm", b"safe", "video/webm")},
         )
     finally:
@@ -331,7 +331,7 @@ def test_database_failure_returns_503_and_removes_recording(monkeypatch, tmp_pat
     monkeypatch.setattr(routes, "logger", Mock())
     try:
         response = client.post(
-            f"/investigations/{investigation.id}/evidence",
+            f"/api/investigations/{investigation.id}/evidence",
             files={"recording": ("recording.webm", b"safe", "video/webm")},
         )
     finally:
@@ -355,7 +355,7 @@ def test_storage_failure_returns_safe_503(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "logger", Mock())
     try:
         response = client.post(
-            f"/investigations/{investigation.id}/evidence",
+            f"/api/investigations/{investigation.id}/evidence",
             files={"recording": ("recording.webm", b"safe", "video/webm")},
         )
     finally:
@@ -393,7 +393,7 @@ def test_evidence_list_is_scoped_and_does_not_expose_storage_key(
 
     monkeypatch.setattr(routes, "list_evidence_items", scoped_list)
     try:
-        response = client.get(f"/investigations/{investigation.id}/evidence")
+        response = client.get(f"/api/investigations/{investigation.id}/evidence")
     finally:
         app.dependency_overrides.clear()
 
@@ -417,7 +417,7 @@ def test_other_installation_cannot_list_evidence(monkeypatch, tmp_path):
 
     monkeypatch.setattr(routes, "list_evidence_items", inaccessible)
     try:
-        response = client.get(f"/investigations/{investigation.id}/evidence")
+        response = client.get(f"/api/investigations/{investigation.id}/evidence")
     finally:
         app.dependency_overrides.clear()
 
@@ -440,7 +440,7 @@ def test_recording_content_is_scoped_before_file_resolution(monkeypatch, tmp_pat
     monkeypatch.setattr(routes, "get_recording_evidence", inaccessible)
     try:
         response = client.get(
-            f"/investigations/{investigation.id}/evidence/{uuid.uuid4()}/content"
+            f"/api/investigations/{investigation.id}/evidence/{uuid.uuid4()}/content"
         )
     finally:
         app.dependency_overrides.clear()
@@ -478,7 +478,7 @@ def test_recording_content_streams_with_persisted_mime_type(monkeypatch, tmp_pat
     monkeypatch.setattr(routes, "get_recording_evidence", scoped_recording)
     try:
         response = client.get(
-            f"/investigations/{investigation.id}/evidence/{evidence_id}/content"
+            f"/api/investigations/{investigation.id}/evidence/{evidence_id}/content"
         )
     finally:
         app.dependency_overrides.clear()
@@ -519,7 +519,7 @@ def test_missing_recording_content_returns_safe_storage_error(monkeypatch, tmp_p
     monkeypatch.setattr(routes, "logger", Mock())
     try:
         response = client.get(
-            f"/investigations/{investigation.id}/evidence/{evidence_id}/content"
+            f"/api/investigations/{investigation.id}/evidence/{evidence_id}/content"
         )
     finally:
         app.dependency_overrides.clear()
@@ -535,7 +535,7 @@ def test_evidence_creation_requires_a_signed_connection():
     from app.main import app
 
     response = TestClient(app).post(
-        f"/investigations/{uuid.uuid4()}/evidence", data={"logs": "hello"}
+        f"/api/investigations/{uuid.uuid4()}/evidence", data={"logs": "hello"}
     )
 
     assert response.status_code == 401

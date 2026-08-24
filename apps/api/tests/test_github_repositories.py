@@ -168,7 +168,7 @@ def test_repositories_without_session_returns_401():
 
     from app.main import app
 
-    response = TestClient(app).get("/github/repositories")
+    response = TestClient(app).get("/api/github/repositories")
 
     assert response.status_code == 401
     assert response.json() == {"detail": "GitHub is not connected."}
@@ -182,7 +182,7 @@ def test_repositories_with_malformed_connection_id_returns_401():
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie("not-a-uuid"))
 
-    response = client.get("/github/repositories")
+    response = client.get("/api/github/repositories")
 
     assert response.status_code == 401
     assert response.json() == {"detail": "GitHub is not connected."}
@@ -201,7 +201,7 @@ def test_repositories_with_missing_persisted_connection_returns_401(monkeypatch)
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie(str(uuid.uuid4())))
 
-    response = client.get("/github/repositories")
+    response = client.get("/api/github/repositories")
 
     assert response.status_code == 401
     assert response.json() == {"detail": "GitHub is not connected."}
@@ -222,7 +222,7 @@ def test_repositories_database_failure_returns_503(monkeypatch):
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie(str(uuid.uuid4())))
 
-    response = client.get("/github/repositories")
+    response = client.get("/api/github/repositories")
 
     assert response.status_code == 503
     assert response.json() == {
@@ -254,7 +254,7 @@ def test_repositories_github_failure_returns_safe_502(monkeypatch):
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie(str(uuid.uuid4())))
 
-    response = client.get("/github/repositories")
+    response = client.get("/api/github/repositories")
 
     assert response.status_code == 502
     assert response.json() == {"detail": "Unable to load GitHub repositories."}
@@ -313,7 +313,7 @@ def test_repositories_use_persisted_installation_and_keep_credentials_ephemeral(
         client.cookies.set(
             "buglens_session", _signed_session_cookie(str(connection.connection_id))
         )
-        response = client.get("/github/repositories?installation_id=123")
+        response = client.get("/api/github/repositories?installation_id=123")
     finally:
         app.dependency_overrides.clear()
 

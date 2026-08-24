@@ -57,6 +57,26 @@ def test_health_is_cheap_and_does_not_access_database(monkeypatch):
     assert response.json() == {"status": "ok"}
 
 
+def test_product_routes_are_mounted_only_under_api_prefix():
+    openapi = main.app.openapi()
+    paths = set(openapi["paths"])
+
+    assert "/api/github/status" in paths
+    assert "/api/projects" in paths
+    assert "/api/investigations" in paths
+    assert "/api/investigations/{investigation_id}/agent-run/events" in paths
+    assert "/github/status" not in paths
+    assert "/projects" not in paths
+    assert "/investigations" not in paths
+    assert not any(path.startswith("/api/api/") for path in paths)
+    assert "servers" not in openapi
+
+    client = TestClient(main.app)
+    assert client.get("/github/status").status_code == 404
+    assert client.get("/projects").status_code == 404
+    assert client.get("/investigations").status_code == 404
+
+
 def test_readiness_returns_ready_after_select_one(monkeypatch):
     connection = FakeConnection()
     fake_engine = FakeEngine(connection=connection)

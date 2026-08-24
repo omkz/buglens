@@ -118,7 +118,7 @@ def test_create_investigation_requires_session():
     from app.main import app
 
     response = TestClient(app).post(
-        f"/projects/{uuid.uuid4()}/investigations",
+        f"/api/projects/{uuid.uuid4()}/investigations",
         json={"title": "Checkout button does nothing"},
     )
 
@@ -134,7 +134,7 @@ def test_create_investigation_rejects_malformed_connection_id():
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie("not-a-uuid"))
     response = client.post(
-        f"/projects/{uuid.uuid4()}/investigations",
+        f"/api/projects/{uuid.uuid4()}/investigations",
         json={"title": "Checkout button does nothing"},
     )
 
@@ -155,7 +155,7 @@ def test_create_investigation_rejects_missing_persisted_connection(monkeypatch):
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie(str(uuid.uuid4())))
     response = client.post(
-        f"/projects/{uuid.uuid4()}/investigations",
+        f"/api/projects/{uuid.uuid4()}/investigations",
         json={"title": "Checkout button does nothing"},
     )
 
@@ -177,7 +177,7 @@ def test_authenticated_creation_is_scoped_and_defaults_to_pending(monkeypatch):
     monkeypatch.setattr(routes, "persist_investigation", persist)
     client = _connected_client(monkeypatch, connection)
     response = client.post(
-        f"/projects/{persisted.project_id}/investigations",
+        f"/api/projects/{persisted.project_id}/investigations",
         json={
             "title": "Checkout button does nothing",
             "description": "Happens after adding an item to cart.",
@@ -212,7 +212,7 @@ def test_project_from_another_installation_returns_404(monkeypatch):
     monkeypatch.setattr(routes, "persist_investigation", inaccessible)
     client = _connected_client(monkeypatch, _connection())
     response = client.post(
-        f"/projects/{uuid.uuid4()}/investigations",
+        f"/api/projects/{uuid.uuid4()}/investigations",
         json={"title": "Checkout button does nothing"},
     )
 
@@ -233,7 +233,7 @@ def test_get_investigations_is_scoped_to_current_installation(monkeypatch):
 
     monkeypatch.setattr(routes, "load_investigations", scoped_list)
     client = _connected_client(monkeypatch, connection)
-    response = client.get("/investigations?installation_id=999999")
+    response = client.get("/api/investigations?installation_id=999999")
 
     assert response.status_code == 200
     assert captured["installation_id"] == connection.installation_id
@@ -255,7 +255,7 @@ def test_get_investigation_detail_is_scoped_to_current_installation(monkeypatch)
 
     monkeypatch.setattr(routes, "load_investigation", scoped_detail)
     client = _connected_client(monkeypatch, connection)
-    response = client.get(f"/investigations/{visible.id}")
+    response = client.get(f"/api/investigations/{visible.id}")
 
     assert response.status_code == 200
     assert captured == {
@@ -272,7 +272,7 @@ def test_inaccessible_investigation_returns_indistinguishable_404(monkeypatch):
 
     monkeypatch.setattr(routes, "load_investigation", inaccessible)
     client = _connected_client(monkeypatch, _connection())
-    response = client.get(f"/investigations/{uuid.uuid4()}")
+    response = client.get(f"/api/investigations/{uuid.uuid4()}")
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Investigation not found."}
@@ -292,7 +292,7 @@ def test_connection_database_failure_returns_safe_503(monkeypatch):
     monkeypatch.setattr(routes, "logger", test_logger)
     client = TestClient(app)
     client.cookies.set("buglens_session", _signed_session_cookie(str(uuid.uuid4())))
-    response = client.get("/investigations")
+    response = client.get("/api/investigations")
 
     assert response.status_code == 503
     assert response.json() == {
@@ -317,7 +317,7 @@ def test_investigation_database_failure_returns_safe_503(monkeypatch):
     monkeypatch.setattr(routes, "logger", test_logger)
     client = _connected_client(monkeypatch, connection)
     response = client.post(
-        f"/projects/{project_id}/investigations",
+        f"/api/projects/{project_id}/investigations",
         json={"title": "Checkout button does nothing"},
     )
 

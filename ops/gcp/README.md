@@ -35,11 +35,14 @@ require `IMAGE_URI`, `CLOUD_SQL_INSTANCE`, and their respective service account:
 deployment additionally requires:
 
 - `GCS_BUCKET`
-- `FRONTEND_BASE_URL`
-- `BACKEND_BASE_URL`
-- `GITHUB_CALLBACK_URL`
+- `APP_BASE_URL` without a trailing slash (for production,
+  `https://app.buglens.ai`)
 - `GITHUB_APP_ID`
 - `GITHUB_APP_SLUG`
+
+The API deployment derives `FRONTEND_BASE_URL`, `BACKEND_BASE_URL`, and
+`GITHUB_CALLBACK_URL` from `APP_BASE_URL` so the public URL configuration cannot
+drift. It also selects the Cloud Run second-generation execution environment.
 
 Optional resource settings and their defaults are:
 
@@ -122,6 +125,23 @@ It does not need Cloud Storage, GitHub, or Gemini access. The deployment identit
 also needs permission to deploy Cloud Run resources and act as the selected
 runtime and migration service accounts.
 
-Browser users call the API directly, so the Cloud Run service remains publicly
-reachable. BugLens application and session authorization continues to protect
-user data.
+Browser requests do not use Cloud Run authentication, so the service remains
+publicly reachable at this stage. BugLens application and session authorization
+continues to protect user data.
+
+## Canonical URL contract
+
+Production uses one public origin. The frontend owns normal page routes and the
+load balancer preserves and sends `/api/*` paths to FastAPI:
+
+- `https://app.buglens.ai/`
+- `https://app.buglens.ai/projects`
+- `https://app.buglens.ai/investigations/...`
+- `https://app.buglens.ai/api/github/...`
+- `https://app.buglens.ai/api/projects`
+- `https://app.buglens.ai/api/investigations/...`
+- `https://app.buglens.ai/api/github/oauth/callback`
+
+Cloud Run default service URLs are implementation details and must not be used
+by the frontend. Cloud Run probes continue to call `/health` and `/ready`
+directly, outside the `/api` product namespace.

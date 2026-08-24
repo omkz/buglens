@@ -46,9 +46,7 @@ required=(
   RUNTIME_SERVICE_ACCOUNT
   CLOUD_SQL_INSTANCE
   GCS_BUCKET
-  FRONTEND_BASE_URL
-  BACKEND_BASE_URL
-  GITHUB_CALLBACK_URL
+  APP_BASE_URL
   GITHUB_APP_ID
   GITHUB_APP_SLUG
   DATABASE_URL_SECRET
@@ -77,9 +75,7 @@ for name in "${secret_versions[@]}"; do
 done
 
 env_values=(
-  FRONTEND_BASE_URL
-  BACKEND_BASE_URL
-  GITHUB_CALLBACK_URL
+  APP_BASE_URL
   GITHUB_APP_ID
   GITHUB_APP_SLUG
   GCS_BUCKET
@@ -89,10 +85,23 @@ for name in "${env_values[@]}"; do
   require_no_separator "$name"
 done
 
+if [[ "$APP_BASE_URL" != https://* ]]; then
+  printf 'error: APP_BASE_URL must start with https://.\n' >&2
+  exit 1
+fi
+
+if [[ "$APP_BASE_URL" == */ ]]; then
+  printf 'error: APP_BASE_URL must not have a trailing slash.\n' >&2
+  exit 1
+fi
+
 github_private_key_path="/var/secrets/buglens/github-private-key.pem"
-environment_variables="^|^FRONTEND_BASE_URL=${FRONTEND_BASE_URL}"
-environment_variables+="|BACKEND_BASE_URL=${BACKEND_BASE_URL}"
-environment_variables+="|GITHUB_CALLBACK_URL=${GITHUB_CALLBACK_URL}"
+frontend_base_url="$APP_BASE_URL"
+backend_base_url="${APP_BASE_URL}/api"
+github_callback_url="${APP_BASE_URL}/api/github/oauth/callback"
+environment_variables="^|^FRONTEND_BASE_URL=${frontend_base_url}"
+environment_variables+="|BACKEND_BASE_URL=${backend_base_url}"
+environment_variables+="|GITHUB_CALLBACK_URL=${github_callback_url}"
 environment_variables+="|GITHUB_APP_ID=${GITHUB_APP_ID}"
 environment_variables+="|GITHUB_APP_SLUG=${GITHUB_APP_SLUG}"
 environment_variables+="|GITHUB_PRIVATE_KEY_PATH=${github_private_key_path}"
@@ -118,6 +127,7 @@ gcloud run deploy "$CLOUD_RUN_SERVICE" \
   --service-account="$RUNTIME_SERVICE_ACCOUNT" \
   --set-cloudsql-instances="$CLOUD_SQL_INSTANCE" \
   --allow-unauthenticated \
+  --execution-environment=gen2 \
   --cpu="$CLOUD_RUN_CPU" \
   --memory="$CLOUD_RUN_MEMORY" \
   --concurrency="$CLOUD_RUN_CONCURRENCY" \

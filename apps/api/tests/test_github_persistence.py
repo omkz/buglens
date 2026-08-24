@@ -64,7 +64,7 @@ def test_install_url_stores_oauth_state_in_the_session():
     from app.main import app
 
     client = TestClient(app, follow_redirects=False)
-    response = client.get("/github/install-url")
+    response = client.get("/api/github/install-url")
 
     assert response.status_code == 200
     url = response.json()["url"]
@@ -81,9 +81,9 @@ def test_oauth_callback_rejects_missing_session_state():
     from app.main import app
 
     client = TestClient(app, follow_redirects=False)
-    # No prior call to /github/install-url, so there is no pending state.
+    # No prior call to /api/github/install-url, so there is no pending state.
     response = client.get(
-        "/github/oauth/callback", params={"code": "irrelevant", "state": "anything"}
+        "/api/github/oauth/callback", params={"code": "irrelevant", "state": "anything"}
     )
 
     assert response.status_code in (302, 307)
@@ -96,10 +96,10 @@ def test_oauth_callback_rejects_tampered_state():
     from app.main import app
 
     client = TestClient(app, follow_redirects=False)
-    client.get("/github/install-url")  # establishes a real pending state
+    client.get("/api/github/install-url")  # establishes a real pending state
 
     response = client.get(
-        "/github/oauth/callback",
+        "/api/github/oauth/callback",
         params={"code": "irrelevant", "state": "not-the-real-state"},
     )
 
@@ -113,7 +113,7 @@ def test_status_without_session_returns_disconnected():
     from app.main import app
 
     client = TestClient(app)
-    response = client.get("/github/status")
+    response = client.get("/api/github/status")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -136,7 +136,7 @@ def test_status_with_malformed_session_connection_id_returns_disconnected():
         "buglens_session",
         _signed_session_cookie({"github_connection_id": "not-a-uuid"}),
     )
-    response = client.get("/github/status")
+    response = client.get("/api/github/status")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -163,7 +163,7 @@ def test_status_with_missing_referenced_connection_returns_disconnected(monkeypa
         _signed_session_cookie({"github_connection_id": str(uuid.uuid4())}),
     )
 
-    response = client.get("/github/status")
+    response = client.get("/api/github/status")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -192,7 +192,7 @@ def test_status_database_failure_returns_safe_service_unavailable(monkeypatch):
         _signed_session_cookie({"github_connection_id": str(uuid.uuid4())}),
     )
 
-    response = client.get("/github/status")
+    response = client.get("/api/github/status")
 
     assert response.status_code == 503
     assert response.json() == {
@@ -390,11 +390,11 @@ def test_oauth_callback_full_flow_persists_connection_without_storing_token(
 
     try:
         client = TestClient(app, follow_redirects=False)
-        install_response = client.get("/github/install-url")
+        install_response = client.get("/api/github/install-url")
         state = install_response.json()["url"].split("state=")[1]
 
         callback_response = client.get(
-            "/github/oauth/callback",
+            "/api/github/oauth/callback",
             params={
                 "code": "fake-code",
                 "state": state,
@@ -406,7 +406,7 @@ def test_oauth_callback_full_flow_persists_connection_without_storing_token(
             f"{get_settings().frontend_base_url}/projects"
         )
 
-        status = client.get("/github/status").json()
+        status = client.get("/api/github/status").json()
         assert status == {
             "connected": True,
             "installation_id": test_github_installation_id,
@@ -415,7 +415,7 @@ def test_oauth_callback_full_flow_persists_connection_without_storing_token(
 
         # A brand new session (no cookie) must not see this connection.
         other_client = TestClient(app)
-        assert other_client.get("/github/status").json() == {
+        assert other_client.get("/api/github/status").json() == {
             "connected": False,
             "installation_id": None,
             "account_login": None,

@@ -17,11 +17,18 @@ this placeholder-only shape:
 postgresql+psycopg://USER:PASSWORD@/buglens?host=/cloudsql/PROJECT:REGION:INSTANCE
 ```
 
-Set these non-secret values in the Cloud Run service configuration:
+Browser product routes are served from one public origin. FastAPI owns `/api/*`
+while `/health`, `/ready`, `/docs`, and `/openapi.json` remain service-level
+paths. Local Next.js development proxies `/api/*` to the API process on port
+8000.
 
-- `FRONTEND_BASE_URL`
-- `BACKEND_BASE_URL`
-- `GITHUB_CALLBACK_URL`
+The GCP deployment script derives the three public URL settings from
+`APP_BASE_URL=https://app.buglens.ai`. The resulting Cloud Run configuration
+contains:
+
+- `FRONTEND_BASE_URL=https://app.buglens.ai`
+- `BACKEND_BASE_URL=https://app.buglens.ai/api`
+- `GITHUB_CALLBACK_URL=https://app.buglens.ai/api/github/oauth/callback`
 - `GITHUB_APP_ID`
 - `GITHUB_APP_SLUG`
 - `LOG_LEVEL`
@@ -35,12 +42,11 @@ Set these non-secret values in the Cloud Run service configuration:
 - `SESSION_COOKIE_SECURE=true`
 - `PLAYWRIGHT_ALLOW_PRIVATE_NETWORK=false`
 
-The following secrets will be supplied through Secret Manager in a later
-deployment change:
+The GCP deployment scripts supply these values through Secret Manager:
 
 - `DATABASE_URL`
 - `SESSION_SECRET`
-- `GITHUB_PRIVATE_KEY`
+- the GitHub private key file referenced by `GITHUB_PRIVATE_KEY_PATH`
 - `GITHUB_CLIENT_ID`
 - `GITHUB_CLIENT_SECRET`
 - `GEMINI_API_KEY`

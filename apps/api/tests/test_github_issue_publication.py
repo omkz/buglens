@@ -505,7 +505,7 @@ def test_publication_is_server_scoped_and_idempotent(monkeypatch):
     from app.main import app
 
     operation = app.openapi()["paths"][
-        "/investigations/{investigation_id}/github-issue"
+        "/api/investigations/{investigation_id}/github-issue"
     ]["post"]
     assert "requestBody" not in operation
 

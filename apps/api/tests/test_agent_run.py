@@ -855,7 +855,7 @@ def test_agent_run_preconditions(monkeypatch, claim_state, status_code):
     monkeypatch.setattr(routes, "claim_agent_run", claim)
     try:
         response = client.post(
-            f"/investigations/{uuid.uuid4()}/agent-run",
+            f"/api/investigations/{uuid.uuid4()}/agent-run",
             json={"attempt_id": str(uuid.uuid4())},
         )
     finally:
@@ -884,7 +884,7 @@ def test_agent_run_is_installation_scoped_ignores_browser_ids_and_persists(monke
     monkeypatch.setattr(routes, "complete_agent_run", complete)
     try:
         response = client.post(
-            f"/investigations/{context.investigation_id}/agent-run",
+            f"/api/investigations/{context.investigation_id}/agent-run",
             json={"attempt_id": str(attempt_id)},
         )
     finally:
@@ -904,7 +904,7 @@ def test_agent_run_request_rejects_browser_selected_metadata(monkeypatch):
     client, app, _routes, _connection = _connected_client(monkeypatch, service)
     try:
         response = client.post(
-            f"/investigations/{uuid.uuid4()}/agent-run",
+            f"/api/investigations/{uuid.uuid4()}/agent-run",
             json={
                 "attempt_id": str(uuid.uuid4()),
                 "repository": "attacker/repo",
@@ -935,7 +935,7 @@ def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatc
     monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
     try:
         response = client.post(
-            f"/investigations/{context.investigation_id}/agent-run",
+            f"/api/investigations/{context.investigation_id}/agent-run",
             json={"attempt_id": str(attempt_id)},
         )
     finally:
@@ -982,7 +982,7 @@ def test_agent_system_failures_return_safe_responses(
     monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
     try:
         response = client.post(
-            f"/investigations/{context.investigation_id}/agent-run",
+            f"/api/investigations/{context.investigation_id}/agent-run",
             json={"attempt_id": str(attempt_id)},
         )
     finally:
@@ -1015,7 +1015,7 @@ def test_agent_result_persistence_failure_marks_exact_attempt_failed(monkeypatch
     monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
     try:
         response = client.post(
-            f"/investigations/{context.investigation_id}/agent-run",
+            f"/api/investigations/{context.investigation_id}/agent-run",
             json={"attempt_id": str(attempt_id)},
         )
     finally:
@@ -1040,13 +1040,13 @@ def test_agent_run_requires_a_valid_signed_connection(monkeypatch):
     try:
         client = TestClient(app)
         missing = client.post(
-            f"/investigations/{uuid.uuid4()}/agent-run",
+            f"/api/investigations/{uuid.uuid4()}/agent-run",
             json={"attempt_id": str(uuid.uuid4())},
         )
         assert missing.status_code == 401
 
         client.cookies.set("buglens_session", _signed_session_cookie("not-a-uuid"))
-        malformed = client.get(f"/investigations/{uuid.uuid4()}/agent-run")
+        malformed = client.get(f"/api/investigations/{uuid.uuid4()}/agent-run")
         assert malformed.status_code == 401
     finally:
         app.dependency_overrides.clear()
@@ -1064,7 +1064,7 @@ def test_get_agent_run_is_scoped_and_returns_stable_empty_shape(monkeypatch):
 
     monkeypatch.setattr(routes, "load_agent_run", load)
     try:
-        response = client.get(f"/investigations/{investigation_id}/agent-run")
+        response = client.get(f"/api/investigations/{investigation_id}/agent-run")
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 200
@@ -1089,7 +1089,7 @@ def test_other_installation_cannot_read_agent_run(monkeypatch):
 
     monkeypatch.setattr(routes, "load_agent_run", inaccessible)
     try:
-        response = client.get(f"/investigations/{uuid.uuid4()}/agent-run")
+        response = client.get(f"/api/investigations/{uuid.uuid4()}/agent-run")
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 404
@@ -1114,7 +1114,7 @@ def test_get_agent_run_restores_persisted_progress(monkeypatch):
 
     monkeypatch.setattr(routes, "load_agent_run", load)
     try:
-        response = client.get(f"/investigations/{investigation_id}/agent-run")
+        response = client.get(f"/api/investigations/{investigation_id}/agent-run")
     finally:
         app.dependency_overrides.clear()
 
@@ -1136,7 +1136,7 @@ def test_other_installation_cannot_stream_agent_progress(monkeypatch):
     monkeypatch.setattr(routes, "load_agent_run", inaccessible)
     try:
         response = client.get(
-            f"/investigations/{uuid.uuid4()}/agent-run/events",
+            f"/api/investigations/{uuid.uuid4()}/agent-run/events",
             params={"attempt_id": str(uuid.uuid4())},
         )
     finally:
@@ -1175,7 +1175,7 @@ def test_progress_persistence_failure_does_not_abort_investigation(monkeypatch):
     monkeypatch.setattr(routes, "SessionLocal", lambda: BrokenSessionContext())
     try:
         response = client.post(
-            f"/investigations/{context.investigation_id}/agent-run",
+            f"/api/investigations/{context.investigation_id}/agent-run",
             json={"attempt_id": str(uuid.uuid4())},
         )
     finally:

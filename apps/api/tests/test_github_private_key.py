@@ -201,7 +201,7 @@ def test_repositories_route_resolves_private_key_from_configured_path(
             "buglens_session",
             _signed_session_cookie(str(connection.connection_id)),
         )
-        response = client.get("/github/repositories")
+        response = client.get("/api/github/repositories")
     finally:
         app.dependency_overrides.clear()
 
@@ -247,7 +247,7 @@ def test_repositories_route_returns_safe_502_when_private_key_unconfigured(
             "buglens_session",
             _signed_session_cookie(str(connection.connection_id)),
         )
-        response = client.get("/github/repositories")
+        response = client.get("/api/github/repositories")
     finally:
         app.dependency_overrides.clear()
 

@@ -56,7 +56,7 @@ def test_sensitive_query_params_are_redacted_from_third_party_logs(capsys):
 
     access_logger = logging.getLogger("uvicorn.access")
     access_logger.info(
-        'GET /github/oauth/callback?code=super-secret-code&state=super-secret-state'
+        'GET /api/github/oauth/callback?code=super-secret-code&state=super-secret-state'
         '&installation_id=555 HTTP/1.1" 307'
     )
 
@@ -73,7 +73,9 @@ def test_oauth_state_redacted_in_query_string(capsys):
     configure_logging(level="INFO", log_format="console")
 
     access_logger = logging.getLogger("uvicorn.access")
-    access_logger.info("GET /github/oauth/callback?state=csrf-token-xyz HTTP/1.1\" 307")
+    access_logger.info(
+        "GET /api/github/oauth/callback?state=csrf-token-xyz HTTP/1.1\" 307"
+    )
 
     captured = capsys.readouterr()
     assert "csrf-token-xyz" not in captured.out

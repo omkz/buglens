@@ -3,7 +3,6 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Response, status
-from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.sessions import SessionMiddleware
@@ -19,6 +18,7 @@ settings = get_settings()
 configure_logging(level=settings.log_level, log_format=settings.log_format)
 
 logger = structlog.get_logger(__name__)
+API_PREFIX = "/api"
 
 
 @asynccontextmanager
@@ -31,7 +31,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="BugLens API",
-    servers=[{"url": settings.backend_base_url}],
     lifespan=lifespan,
 )
 
@@ -45,21 +44,9 @@ app.add_middleware(
     https_only=settings.session_cookie_secure,
 )
 
-# Added last so it's the outermost middleware and applies to every
-# response, including ones from SessionMiddleware or error handling.
-# allow_credentials=True is required so the browser will send/receive the
-# session cookie on cross-origin requests from the Next.js frontend.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.frontend_base_url],
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["*"],
-)
-
-app.include_router(github_router)
-app.include_router(projects_router)
-app.include_router(investigations_router)
+app.include_router(github_router, prefix=API_PREFIX)
+app.include_router(projects_router, prefix=API_PREFIX)
+app.include_router(investigations_router, prefix=API_PREFIX)
 
 logger.info("buglens_api_startup", log_format=settings.log_format)
 
