@@ -5,7 +5,7 @@ from sqlalchemy import pool
 
 from alembic import context
 
-from app.config import get_settings
+from app.config import escape_alembic_url, get_settings
 from app.db.base import Base
 
 # Import side effect: registers all models on Base.metadata so autogenerate
@@ -23,7 +23,10 @@ if config.config_file_name is not None:
 
 # Read the database URL from the application's own Settings (env vars /
 # .env) instead of hard-coding credentials in alembic.ini.
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+config.set_main_option(
+    "sqlalchemy.url",
+    escape_alembic_url(get_settings().database_url),
+)
 
 # add your model's MetaData object here
 # for 'autogenerate' support

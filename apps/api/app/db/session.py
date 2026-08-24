@@ -13,16 +13,31 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
-from app.config import get_settings
-
-settings = get_settings()
+from app.config import Settings, get_settings
 
 # postgresql+psycopg selects psycopg 3's async implementation automatically
 # under create_async_engine -- no URL or driver change needed vs. the sync
 # engine Alembic uses.
-engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+def create_database_engine(settings: Settings) -> AsyncEngine:
+    return create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        pool_size=settings.database_pool_size,
+        max_overflow=settings.database_max_overflow,
+        pool_timeout=settings.database_pool_timeout_seconds,
+        pool_recycle=settings.database_pool_recycle_seconds,
+        pool_use_lifo=True,
+    )
+
+
+engine = create_database_engine(get_settings())
 
 SessionLocal = async_sessionmaker(
     bind=engine, autoflush=False, expire_on_commit=False

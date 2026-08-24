@@ -14,10 +14,10 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from app.config import get_settings
+from app.config import Settings, escape_alembic_url, get_settings
 from app.db import models  # noqa: F401  (registers tables on Base.metadata)
 from app.db.base import Base
-from app.db.session import engine, get_db
+from app.db.session import create_database_engine, engine, get_db
 
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
@@ -30,6 +30,59 @@ def test_settings_expose_a_postgres_database_url():
 def test_engine_is_async_and_uses_the_configured_database_url():
     assert isinstance(engine, AsyncEngine)
     assert engine.url.drivername == "postgresql+psycopg"
+
+
+def test_engine_factory_applies_configured_cloud_run_pool_limits(monkeypatch):
+    from app.db import session
+
+    captured = {}
+    sentinel = object()
+
+    def fake_create_async_engine(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return sentinel
+
+    monkeypatch.setattr(session, "create_async_engine", fake_create_async_engine)
+    settings = Settings(
+        session_secret="test-secret",
+        database_url="postgresql+psycopg://user:password@localhost/buglens",
+        database_pool_size=7,
+        database_max_overflow=3,
+        database_pool_timeout_seconds=12,
+        database_pool_recycle_seconds=900,
+        _env_file=None,
+    )
+
+    created = create_database_engine(settings)
+
+    assert created is sentinel
+    assert captured == {
+        "url": settings.database_url,
+        "kwargs": {
+            "pool_pre_ping": True,
+            "pool_size": 7,
+            "max_overflow": 3,
+            "pool_timeout": 12,
+            "pool_recycle": 900,
+            "pool_use_lifo": True,
+        },
+    }
+
+
+def test_alembic_url_escaping_preserves_percent_encoded_credentials():
+    from alembic.config import Config
+
+    database_url = (
+        "postgresql+psycopg://user:pa%25ss%40word@localhost:5432/buglens"
+    )
+    escaped_url = escape_alembic_url(database_url)
+    config = Config()
+
+    config.set_main_option("sqlalchemy.url", escaped_url)
+
+    assert escaped_url.count("%%") == 2
+    assert config.get_main_option("sqlalchemy.url") == database_url
 
 
 def test_expected_tables_are_registered_on_the_metadata():
