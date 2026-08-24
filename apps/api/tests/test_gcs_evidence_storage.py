@@ -4,6 +4,7 @@ import threading
 import uuid
 from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory as SystemTemporaryDirectory
 
 import anyio
 import pytest
@@ -39,12 +40,14 @@ class FakeReader:
 
 
 class FakeBlob:
-    def __init__(self, name: str):
+    def __init__(self, name: str, *, generation: int | None = None):
         self.name = name
+        self.generation = generation
         self.upload_calls = []
         self.upload_error: Exception | None = None
         self.exists_result = True
         self.exists_error: Exception | None = None
+        self.exists_calls = 0
         self.delete_calls = 0
         self.delete_error: Exception | None = None
         self.reader = FakeReader([])
@@ -62,6 +65,7 @@ class FakeBlob:
 
     def exists(self) -> bool:
         self.operation_threads.append(threading.get_ident())
+        self.exists_calls += 1
         if self.exists_error is not None:
             raise self.exists_error
         return self.exists_result
@@ -91,10 +95,25 @@ class FakeBucket:
         self.name = name
         self.blobs: dict[str, FakeBlob] = {}
         self.requested_names: list[str] = []
+        self.get_blob_results: dict[str, FakeBlob | None] = {}
+        self.get_blob_calls: list[str] = []
+        self.get_blob_threads: list[int] = []
+        self.get_blob_error: Exception | None = None
 
     def blob(self, name: str) -> FakeBlob:
         self.requested_names.append(name)
         return self.blobs.setdefault(name, FakeBlob(name))
+
+    def get_blob(self, name: str) -> FakeBlob | None:
+        self.get_blob_calls.append(name)
+        self.get_blob_threads.append(threading.get_ident())
+        if self.get_blob_error is not None:
+            raise self.get_blob_error
+        if name in self.get_blob_results:
+            return self.get_blob_results[name]
+        blob = self.blobs.setdefault(name, FakeBlob(name))
+        blob.generation = blob.generation or 1
+        return blob
 
 
 class FakeClient:
@@ -247,16 +266,22 @@ async def test_gcs_upload_failure_is_backend_neutral():
 async def test_gcs_open_content_streams_chunks_and_closes_reader():
     storage, bucket = _gcs_storage()
     key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
-    blob = bucket.blob(key)
+    blob = FakeBlob(key, generation=42)
     blob.reader = FakeReader([b"first", b"second"])
+    bucket.get_blob_results[key] = blob
     event_loop_thread = threading.get_ident()
 
     content = await storage.open_content(key)
     chunks = [chunk async for chunk in content.chunks]
 
     assert chunks == [b"first", b"second"]
+    assert bucket.get_blob_calls == [key]
+    assert bucket.requested_names == []
+    assert blob.generation == 42
     assert blob.open_calls == [("rb", {"chunk_size": 1024 * 1024})]
+    assert blob.exists_calls == 0
     assert blob.reader.closed is True
+    assert bucket.get_blob_threads[0] != event_loop_thread
     assert all(thread != event_loop_thread for thread in blob.reader.read_threads)
     assert blob.reader.close_thread != event_loop_thread
 
@@ -265,12 +290,15 @@ async def test_gcs_open_content_streams_chunks_and_closes_reader():
 async def test_missing_gcs_content_is_unavailable_before_streaming():
     storage, bucket = _gcs_storage()
     key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
-    bucket.blob(key).exists_result = False
+    bucket.get_blob_results[key] = None
 
     with pytest.raises(
         EvidenceStorageError, match="^Evidence content is unavailable\\.$"
     ):
         await storage.open_content(key)
+
+    assert bucket.get_blob_calls == [key]
+    assert bucket.requested_names == []
 
 
 @pytest.mark.anyio
@@ -298,11 +326,12 @@ async def test_gcs_delete_failure_is_backend_neutral():
 
 
 @pytest.mark.anyio
-async def test_gcs_materialize_downloads_and_removes_temporary_content():
+async def test_gcs_materialize_uses_pinned_blob_and_removes_temporary_content():
     storage, bucket = _gcs_storage()
     key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
-    blob = bucket.blob(key)
+    blob = FakeBlob(key, generation=84)
     blob.download_content = b"recording-content"
+    bucket.get_blob_results[key] = blob
 
     async with storage.materialize(key) as path:
         materialized_path = path
@@ -311,8 +340,27 @@ async def test_gcs_materialize_downloads_and_removes_temporary_content():
         assert path.read_bytes() == b"recording-content"
 
     assert blob.download_paths == [materialized_path]
+    assert blob.generation == 84
+    assert bucket.get_blob_calls == [key]
+    assert bucket.requested_names == []
     assert not materialized_path.exists()
     assert not temporary_directory.exists()
+
+
+@pytest.mark.anyio
+async def test_missing_gcs_materialization_is_unavailable_before_download():
+    storage, bucket = _gcs_storage()
+    key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
+    bucket.get_blob_results[key] = None
+
+    with pytest.raises(
+        EvidenceStorageError, match="^Evidence content is unavailable\\.$"
+    ):
+        async with storage.materialize(key):
+            pytest.fail("missing content must not be yielded")
+
+    assert bucket.get_blob_calls == [key]
+    assert bucket.requested_names == []
 
 
 @pytest.mark.anyio
@@ -330,6 +378,32 @@ async def test_gcs_materialize_cleans_up_when_consumer_fails():
     assert materialized_path is not None
     assert not materialized_path.exists()
     assert not materialized_path.parent.exists()
+
+
+@pytest.mark.anyio
+async def test_gcs_materialize_cleanup_error_is_backend_neutral(
+    monkeypatch, tmp_path
+):
+    from app.investigations import evidence_storage
+
+    storage, bucket = _gcs_storage()
+    key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
+    bucket.blob(key).download_content = b"recording-content"
+
+    class CleanupFailure:
+        def __init__(self):
+            self.temporary_directory = SystemTemporaryDirectory(dir=tmp_path)
+            self.name = self.temporary_directory.name
+
+        def cleanup(self) -> None:
+            self.temporary_directory.cleanup()
+            raise OSError("private temporary path")
+
+    monkeypatch.setattr(evidence_storage, "TemporaryDirectory", CleanupFailure)
+
+    with pytest.raises(EvidenceStorageError, match="^Unable to read evidence\\.$"):
+        async with storage.materialize(key):
+            pass
 
 
 @pytest.mark.anyio

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from base64 import b64encode
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,11 +18,15 @@ from app.integrations.github.repository import PersistedGitHubConnection
 from app.investigations.analyzer import (
     AnalysisInput,
     AnalyzerConfigurationError,
+    AnalyzerEvidenceError,
     AnalyzerProviderError,
     BugAnalysis,
     InvestigationAnalyzerService,
 )
-from app.investigations.evidence_storage import LocalEvidenceStorage
+from app.investigations.evidence_storage import (
+    EvidenceStorageError,
+    LocalEvidenceStorage,
+)
 from app.investigations.gemini import GeminiBugAnalyzer
 from app.investigations.repository import (
     AnalysisClaim,
@@ -113,6 +118,27 @@ class FakeService:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class SuccessfulAnalyzer:
+    model_name = "fake"
+
+    def __init__(self):
+        self.calls = []
+
+    async def analyze(self, analysis_input):
+        self.calls.append(analysis_input)
+        return _analysis()
+
+
+class ExitFailingStorage:
+    def __init__(self, path: Path):
+        self.path = path
+
+    @asynccontextmanager
+    async def materialize(self, _storage_key):
+        yield self.path
+        raise EvidenceStorageError("Unable to read evidence.")
 
 
 class FakeDatabaseSession:
@@ -279,6 +305,44 @@ def test_analysis_failure_is_safe_and_marks_investigation_failed(
     assert failed_ids == [investigation.id]
 
 
+def test_materialization_exit_failure_returns_safe_503_and_marks_failed(
+    monkeypatch, tmp_path
+):
+    recording_path = tmp_path / "recording.webm"
+    recording_path.write_bytes(b"video-data")
+    analyzer = SuccessfulAnalyzer()
+    service = InvestigationAnalyzerService(
+        analyzer, ExitFailingStorage(recording_path)
+    )
+    client, app, routes, _connection_value = _connected_client(monkeypatch, service)
+    investigation = _investigation()
+    failed_ids = []
+
+    async def claim(*args, **kwargs):
+        return AnalysisClaim(
+            state=AnalysisClaimState.READY,
+            investigation=investigation,
+            evidence=[_evidence(investigation.id, kind="recording")],
+        )
+
+    async def mark_failed(db, *, investigation_id):
+        failed_ids.append(investigation_id)
+
+    monkeypatch.setattr(routes, "claim_analysis", claim)
+    monkeypatch.setattr(routes, "mark_analysis_failed", mark_failed)
+    try:
+        response = client.post(f"/investigations/{investigation.id}/analyze")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Investigation evidence is temporarily unavailable."
+    }
+    assert len(analyzer.calls) == 1
+    assert failed_ids == [investigation.id]
+
+
 def test_failed_analysis_can_be_retried_without_duplicate_result(monkeypatch):
     service = FakeService()
     client, app, routes, _connection_value = _connected_client(monkeypatch, service)
@@ -381,6 +445,53 @@ async def test_analysis_service_passes_logs_and_resolves_recordings_server_side(
     assert analyzer.received.logs == ["TypeError: checkout is undefined"]
     assert analyzer.received.recordings[0].path == recording_path.resolve()
     assert analyzer.received.recordings[0].mime_type == "video/webm"
+
+
+@pytest.mark.anyio
+async def test_analysis_service_translates_materialization_context_exit_error(
+    tmp_path: Path,
+):
+    investigation = _investigation()
+    recording = _evidence(investigation.id, kind="recording")
+    recording_path = tmp_path / "recording.webm"
+    recording_path.write_bytes(b"video-data")
+    analyzer = SuccessfulAnalyzer()
+    service = InvestigationAnalyzerService(
+        analyzer, ExitFailingStorage(recording_path)
+    )
+
+    with pytest.raises(
+        AnalyzerEvidenceError, match="^Recording evidence is unavailable\\.$"
+    ) as exc_info:
+        await service.analyze(investigation, [recording])
+
+    assert isinstance(exc_info.value.__cause__, EvidenceStorageError)
+    assert len(analyzer.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_analysis_service_preserves_analyzer_provider_errors(tmp_path: Path):
+    investigation = _investigation()
+    recording = _evidence(investigation.id, kind="recording")
+    recording_path = tmp_path / recording.storage_key
+    recording_path.parent.mkdir(parents=True)
+    recording_path.write_bytes(b"video-data")
+    provider_error = AnalyzerProviderError("provider failed")
+
+    class ProviderFailingAnalyzer:
+        model_name = "fake"
+
+        async def analyze(self, _analysis_input):
+            raise provider_error
+
+    service = InvestigationAnalyzerService(
+        ProviderFailingAnalyzer(), LocalEvidenceStorage(tmp_path)
+    )
+
+    with pytest.raises(AnalyzerProviderError) as exc_info:
+        await service.analyze(investigation, [recording])
+
+    assert exc_info.value is provider_error
 
 
 class FakeGeminiFiles:

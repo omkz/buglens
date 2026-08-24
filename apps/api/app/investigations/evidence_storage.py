@@ -238,21 +238,13 @@ class GCSEvidenceStorage:
 
     async def open_content(self, storage_key: str) -> EvidenceContent:
         _validate_storage_key(storage_key)
-        blob = self.bucket.blob(storage_key)
-        try:
-            exists = await anyio.to_thread.run_sync(blob.exists)
-        except NotFound as exc:
-            raise EvidenceStorageError("Evidence content is unavailable.") from exc
-        except (GoogleAPIError, OSError) as exc:
-            raise EvidenceStorageError("Unable to read evidence.") from exc
-        if not exists:
-            raise EvidenceStorageError("Evidence content is unavailable.")
+        blob = await self._get_blob(storage_key)
         return EvidenceContent(chunks=self._stream_blob(blob))
 
     @asynccontextmanager
     async def materialize(self, storage_key: str) -> AsyncIterator[Path]:
         _validate_storage_key(storage_key)
-        blob = self.bucket.blob(storage_key)
+        blob = await self._get_blob(storage_key)
         suffix = Path(storage_key).suffix.lower()
         if suffix not in _EXTENSIONS.values():
             suffix = ""
@@ -275,7 +267,23 @@ class GCSEvidenceStorage:
             yield path
         finally:
             with anyio.CancelScope(shield=True):
-                await anyio.to_thread.run_sync(temporary_directory.cleanup)
+                try:
+                    await anyio.to_thread.run_sync(temporary_directory.cleanup)
+                except OSError as exc:
+                    raise EvidenceStorageError("Unable to read evidence.") from exc
+
+    async def _get_blob(self, storage_key: str) -> storage.Blob:
+        try:
+            blob = await anyio.to_thread.run_sync(
+                self.bucket.get_blob, storage_key
+            )
+        except NotFound as exc:
+            raise EvidenceStorageError("Evidence content is unavailable.") from exc
+        except (GoogleAPIError, OSError) as exc:
+            raise EvidenceStorageError("Unable to read evidence.") from exc
+        if blob is None:
+            raise EvidenceStorageError("Evidence content is unavailable.")
+        return blob
 
     async def _stream_blob(self, blob: storage.Blob) -> AsyncIterator[bytes]:
         reader: BinaryIO | None = None
