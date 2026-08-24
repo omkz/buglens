@@ -1,7 +1,8 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,7 +28,9 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/buglens"
 
+    evidence_storage_backend: Literal["local", "gcs"] = "local"
     evidence_storage_dir: Path = Path(".data/evidence")
+    gcs_bucket: str = ""
     max_evidence_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
 
     gemini_api_key: str = ""
@@ -40,6 +43,14 @@ class Settings(BaseSettings):
 
     session_secret: str
     session_cookie_secure: bool = False
+
+    @model_validator(mode="after")
+    def validate_evidence_storage(self) -> Self:
+        if self.evidence_storage_backend == "gcs" and not self.gcs_bucket.strip():
+            raise ValueError(
+                "GCS_BUCKET is required when EVIDENCE_STORAGE_BACKEND=gcs."
+            )
+        return self
 
 
 @lru_cache

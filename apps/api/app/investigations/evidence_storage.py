@@ -6,11 +6,15 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import AsyncContextManager, BinaryIO, Protocol
 
 import anyio
 from fastapi import UploadFile
+from google.api_core.exceptions import GoogleAPIError, NotFound
+from google.cloud import storage
 
 _CHUNK_SIZE = 1024 * 1024
 _EXTENSIONS = {
@@ -60,6 +64,27 @@ class EvidenceStorage(Protocol):
     def materialize(self, storage_key: str) -> AsyncContextManager[Path]: ...
 
 
+def _validate_storage_key(storage_key: str) -> None:
+    parts = storage_key.split("/")
+    if (
+        not storage_key
+        or storage_key.startswith("/")
+        or "\\" in storage_key
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(not character.isprintable() for character in storage_key)
+    ):
+        raise EvidenceStorageError("Invalid evidence storage key.")
+
+
+def _recording_storage_key(
+    investigation_id: uuid.UUID,
+    evidence_id: uuid.UUID,
+    mime_type: str,
+) -> str:
+    extension = _EXTENSIONS[mime_type.split(";", 1)[0]]
+    return f"{investigation_id}/{evidence_id}{extension}"
+
+
 class LocalEvidenceStorage:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -73,8 +98,9 @@ class LocalEvidenceStorage:
         mime_type: str,
         max_bytes: int,
     ) -> StoredRecording:
-        extension = _EXTENSIONS[mime_type.split(";", 1)[0]]
-        storage_key = f"{investigation_id}/{evidence_id}{extension}"
+        storage_key = _recording_storage_key(
+            investigation_id, evidence_id, mime_type
+        )
         target = await anyio.to_thread.run_sync(self._resolve_key, storage_key)
         partial = target.with_suffix(f"{target.suffix}.part")
         writer: BinaryIO | None = None
@@ -136,9 +162,11 @@ class LocalEvidenceStorage:
             raise EvidenceStorageError("Unable to read evidence.") from exc
         finally:
             if reader is not None:
-                await anyio.to_thread.run_sync(reader.close)
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(reader.close)
 
     def _resolve_key(self, storage_key: str) -> Path:
+        _validate_storage_key(storage_key)
         candidate = (self.root / storage_key).resolve()
         if not candidate.is_relative_to(self.root):
             raise EvidenceStorageError("Invalid evidence storage key.")
@@ -149,3 +177,135 @@ class LocalEvidenceStorage:
             await anyio.to_thread.run_sync(path.unlink, True)
         except OSError as exc:
             raise EvidenceStorageError("Unable to remove evidence.") from exc
+
+
+class GCSEvidenceStorage:
+    def __init__(
+        self,
+        bucket_name: str,
+        client: storage.Client | None = None,
+    ):
+        self.client = client if client is not None else storage.Client()
+        self.bucket = self.client.bucket(bucket_name)
+
+    async def save_recording(
+        self,
+        upload: UploadFile,
+        *,
+        investigation_id: uuid.UUID,
+        evidence_id: uuid.UUID,
+        mime_type: str,
+        max_bytes: int,
+    ) -> StoredRecording:
+        storage_key = _recording_storage_key(
+            investigation_id, evidence_id, mime_type
+        )
+        _validate_storage_key(storage_key)
+        size_bytes = 0
+        while chunk := await upload.read(_CHUNK_SIZE):
+            size_bytes += len(chunk)
+            if size_bytes > max_bytes:
+                raise RecordingTooLargeError
+        if size_bytes == 0:
+            raise EmptyRecordingError
+
+        blob = self.bucket.blob(storage_key)
+        content_type = mime_type.split(";", 1)[0]
+        try:
+            await upload.seek(0)
+            await anyio.to_thread.run_sync(
+                lambda: blob.upload_from_file(
+                    upload.file,
+                    size=size_bytes,
+                    content_type=content_type,
+                    if_generation_match=0,
+                )
+            )
+        except (GoogleAPIError, OSError, RuntimeError) as exc:
+            raise EvidenceStorageError("Unable to store evidence.") from exc
+
+        return StoredRecording(storage_key=storage_key, size_bytes=size_bytes)
+
+    async def delete(self, storage_key: str) -> None:
+        _validate_storage_key(storage_key)
+        blob = self.bucket.blob(storage_key)
+        try:
+            await anyio.to_thread.run_sync(blob.delete)
+        except NotFound:
+            return
+        except (GoogleAPIError, OSError) as exc:
+            raise EvidenceStorageError("Unable to remove evidence.") from exc
+
+    async def open_content(self, storage_key: str) -> EvidenceContent:
+        _validate_storage_key(storage_key)
+        blob = self.bucket.blob(storage_key)
+        try:
+            exists = await anyio.to_thread.run_sync(blob.exists)
+        except NotFound as exc:
+            raise EvidenceStorageError("Evidence content is unavailable.") from exc
+        except (GoogleAPIError, OSError) as exc:
+            raise EvidenceStorageError("Unable to read evidence.") from exc
+        if not exists:
+            raise EvidenceStorageError("Evidence content is unavailable.")
+        return EvidenceContent(chunks=self._stream_blob(blob))
+
+    @asynccontextmanager
+    async def materialize(self, storage_key: str) -> AsyncIterator[Path]:
+        _validate_storage_key(storage_key)
+        blob = self.bucket.blob(storage_key)
+        suffix = Path(storage_key).suffix.lower()
+        if suffix not in _EXTENSIONS.values():
+            suffix = ""
+        try:
+            temporary_directory = await anyio.to_thread.run_sync(TemporaryDirectory)
+        except OSError as exc:
+            raise EvidenceStorageError("Unable to read evidence.") from exc
+        path = Path(temporary_directory.name) / f"evidence{suffix}"
+        try:
+            try:
+                await anyio.to_thread.run_sync(
+                    lambda: blob.download_to_filename(str(path))
+                )
+            except NotFound as exc:
+                raise EvidenceStorageError(
+                    "Evidence content is unavailable."
+                ) from exc
+            except (GoogleAPIError, OSError) as exc:
+                raise EvidenceStorageError("Unable to read evidence.") from exc
+            yield path
+        finally:
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(temporary_directory.cleanup)
+
+    async def _stream_blob(self, blob: storage.Blob) -> AsyncIterator[bytes]:
+        reader: BinaryIO | None = None
+        try:
+            reader = await anyio.to_thread.run_sync(
+                lambda: blob.open("rb", chunk_size=_CHUNK_SIZE)
+            )
+            while chunk := await anyio.to_thread.run_sync(reader.read, _CHUNK_SIZE):
+                yield chunk
+        except NotFound as exc:
+            raise EvidenceStorageError("Evidence content is unavailable.") from exc
+        except (GoogleAPIError, OSError) as exc:
+            raise EvidenceStorageError("Unable to read evidence.") from exc
+        finally:
+            if reader is not None:
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await anyio.to_thread.run_sync(reader.close)
+                    except (GoogleAPIError, OSError) as exc:
+                        raise EvidenceStorageError("Unable to read evidence.") from exc
+
+
+@lru_cache(maxsize=4)
+def create_evidence_storage(
+    backend: str,
+    evidence_storage_dir: str,
+    gcs_bucket: str,
+) -> EvidenceStorage:
+    if backend == "local":
+        return LocalEvidenceStorage(Path(evidence_storage_dir))
+    if backend == "gcs":
+        return GCSEvidenceStorage(gcs_bucket)
+    raise ValueError(f"Unsupported evidence storage backend: {backend}")

@@ -83,8 +83,8 @@ from .evidence_storage import (
     EmptyRecordingError,
     EvidenceStorage,
     EvidenceStorageError,
-    LocalEvidenceStorage,
     RecordingTooLargeError,
+    create_evidence_storage,
 )
 from .gemini import GeminiBugAnalyzer
 from .repository import (
@@ -205,7 +205,11 @@ class GitHubIssuePublicationResponse(BaseModel):
 def get_evidence_storage(
     settings: Settings = Depends(get_settings),
 ) -> EvidenceStorage:
-    return LocalEvidenceStorage(settings.evidence_storage_dir)
+    return create_evidence_storage(
+        settings.evidence_storage_backend,
+        str(settings.evidence_storage_dir),
+        settings.gcs_bucket,
+    )
 
 
 def get_bug_analyzer(settings: Settings = Depends(get_settings)) -> BugAnalyzer:
