@@ -107,6 +107,62 @@ jobs:
         if: always()
         run: docker rm -f buglens-api-ci >/dev/null 2>&1 || true
 
+  web-container:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build web production image
+        run: docker build -t buglens-web:ci apps/web
+
+      - name: Verify non-root runtime user
+        run: |
+          docker run --rm \
+            --entrypoint sh \
+            buglens-web:ci \
+            -c 'test "$(id -u)" = "10001"'
+
+      - name: Start web container on Cloud Run port
+        run: |
+          docker run -d \
+            --name buglens-web-ci \
+            -e PORT=8092 \
+            -p 127.0.0.1:8092:8092 \
+            buglens-web:ci
+
+      - name: Wait for web health and verify root page
+        run: |
+          healthy=false
+
+          for _ in {1..20}; do
+            if response="$(curl --fail --silent --show-error http://127.0.0.1:8092/health)"; then
+              if [ "$response" = '{"status":"ok"}' ]; then
+                healthy=true
+                break
+              fi
+            fi
+
+            if [ "$(docker inspect --format='{{.State.Running}}' buglens-web-ci)" != "true" ]; then
+              docker logs buglens-web-ci || true
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          if [ "$healthy" != "true" ]; then
+            docker logs buglens-web-ci || true
+            exit 1
+          fi
+
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8092/
+
+      - name: Remove web container
+        if: always()
+        run: docker rm -f buglens-web-ci >/dev/null 2>&1 || true
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
