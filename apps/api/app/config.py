@@ -6,9 +6,13 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
+class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/buglens"
+
+
+class Settings(DatabaseSettings):
     github_app_id: str = ""
     github_app_slug: str = ""
     github_private_key: str = ""
@@ -26,7 +30,6 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "console"
 
-    database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/buglens"
     database_pool_size: int = Field(default=5, ge=1, le=50)
     database_max_overflow: int = Field(default=2, ge=0, le=50)
     database_pool_timeout_seconds: float = Field(default=30, gt=0, le=120)
@@ -60,6 +63,11 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+@lru_cache
+def get_database_settings() -> DatabaseSettings:
+    return DatabaseSettings()
 
 
 def escape_alembic_url(database_url: str) -> str:

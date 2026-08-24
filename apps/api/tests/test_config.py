@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings
+from app.config import DatabaseSettings, Settings
 
 
 def _settings(**updates) -> Settings:
@@ -15,6 +15,17 @@ def test_session_secret_is_required(monkeypatch):
         Settings(_env_file=None)
 
     assert "session_secret" in str(exc_info.value)
+
+
+def test_database_settings_do_not_require_runtime_session_secret(monkeypatch):
+    monkeypatch.delenv("SESSION_SECRET", raising=False)
+
+    settings = DatabaseSettings(
+        database_url="postgresql+psycopg://user:password@localhost/buglens",
+        _env_file=None,
+    )
+
+    assert settings.database_url.endswith("@localhost/buglens")
 
 
 def test_database_pool_and_local_development_defaults(monkeypatch):

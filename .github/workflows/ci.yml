@@ -40,6 +40,9 @@ jobs:
       - name: Check application import
         run: uv run python -c "from app.main import app; assert app.title == 'BugLens API'"
 
+      - name: Validate GCP deployment scripts
+        run: bash -n ../../ops/gcp/*.sh
+
   api-container:
     runs-on: ubuntu-latest
 
