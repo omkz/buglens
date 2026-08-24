@@ -14,11 +14,6 @@ command -v curl >/dev/null 2>&1 || {
   exit 1
 }
 
-command -v gcloud >/dev/null 2>&1 || {
-  printf 'error: gcloud is required.\n' >&2
-  exit 1
-}
-
 require_env APP_BASE_URL
 
 if [[ "$APP_BASE_URL" != https://* ]]; then
