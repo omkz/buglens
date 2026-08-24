@@ -43,6 +43,9 @@ jobs:
       - name: Validate GCP deployment scripts
         run: bash -n ../../ops/gcp/*.sh
 
+      - name: Test GCP release script contracts
+        run: ../../ops/gcp/test-scripts.sh
+
   api-container:
     runs-on: ubuntu-latest
 

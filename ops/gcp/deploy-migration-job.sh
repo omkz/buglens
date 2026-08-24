@@ -19,7 +19,7 @@ MIGRATION_JOB_NAME="${MIGRATION_JOB_NAME:-buglens-migrate}"
 required=(
   GCP_PROJECT_ID
   GCP_REGION
-  IMAGE_URI
+  API_IMAGE_URI
   MIGRATION_SERVICE_ACCOUNT
   CLOUD_SQL_INSTANCE
   DATABASE_URL_SECRET
@@ -30,6 +30,11 @@ for name in "${required[@]}"; do
   require_env "$name"
 done
 
+if [[ ! "$API_IMAGE_URI" =~ :[0-9a-fA-F]{40}$ ]]; then
+  printf 'error: API_IMAGE_URI must use a full Git SHA tag.\n' >&2
+  exit 1
+fi
+
 if [[ ! "$DATABASE_URL_SECRET_VERSION" =~ ^[1-9][0-9]*$ ]]; then
   printf 'error: DATABASE_URL_SECRET_VERSION must be an explicit numeric secret version.\n' >&2
   exit 1
@@ -38,7 +43,7 @@ fi
 gcloud run jobs deploy "$MIGRATION_JOB_NAME" \
   --project="$GCP_PROJECT_ID" \
   --region="$GCP_REGION" \
-  --image="$IMAGE_URI" \
+  --image="$API_IMAGE_URI" \
   --service-account="$MIGRATION_SERVICE_ACCOUNT" \
   --set-cloudsql-instances="$CLOUD_SQL_INSTANCE" \
   --set-secrets="DATABASE_URL=${DATABASE_URL_SECRET}:${DATABASE_URL_SECRET_VERSION}" \

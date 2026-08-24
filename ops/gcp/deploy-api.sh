@@ -42,7 +42,7 @@ CLOUD_RUN_TIMEOUT="${CLOUD_RUN_TIMEOUT:-900}"
 required=(
   GCP_PROJECT_ID
   GCP_REGION
-  IMAGE_URI
+  API_IMAGE_URI
   RUNTIME_SERVICE_ACCOUNT
   CLOUD_SQL_INSTANCE
   GCS_BUCKET
@@ -60,6 +60,11 @@ required=(
 for name in "${required[@]}"; do
   require_env "$name"
 done
+
+if [[ ! "$API_IMAGE_URI" =~ :[0-9a-fA-F]{40}$ ]]; then
+  printf 'error: API_IMAGE_URI must use a full Git SHA tag.\n' >&2
+  exit 1
+fi
 
 secret_versions=(
   DATABASE_URL_SECRET_VERSION
@@ -123,10 +128,12 @@ secret_references+=",${github_private_key_path}=${GITHUB_PRIVATE_KEY_SECRET}:${G
 gcloud run deploy "$CLOUD_RUN_SERVICE" \
   --project="$GCP_PROJECT_ID" \
   --region="$GCP_REGION" \
-  --image="$IMAGE_URI" \
+  --image="$API_IMAGE_URI" \
   --service-account="$RUNTIME_SERVICE_ACCOUNT" \
   --set-cloudsql-instances="$CLOUD_SQL_INSTANCE" \
   --allow-unauthenticated \
+  --ingress=internal-and-cloud-load-balancing \
+  --no-default-url \
   --execution-environment=gen2 \
   --cpu="$CLOUD_RUN_CPU" \
   --memory="$CLOUD_RUN_MEMORY" \

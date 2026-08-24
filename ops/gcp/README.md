@@ -1,68 +1,124 @@
-# BugLens Google Cloud deployment
+# BugLens Google Cloud production release
 
-These scripts update Cloud Run resources that already exist in a prepared
-Google Cloud project. They do not build or push images, provision Cloud SQL or
-Cloud Storage, create secrets, or grant prerequisite IAM roles.
+These scripts build immutable API and web images, deploy existing BugLens
+resources, and reconcile the first-region production load balancer. They do not
+create Cloud SQL, Cloud Storage buckets, service accounts, IAM grants, secret
+contents, or DNS records. They never run automatically from CI.
 
-Use an immutable image reference tagged with the source commit SHA, for example:
+Production has one public origin:
+
+```text
+https://app.buglens.ai/*       -> buglens-web
+https://app.buglens.ai/api     -> buglens-api
+https://app.buglens.ai/api/*   -> buglens-api
+```
+
+The global external Application Load Balancer preserves every request path.
+Cloud Run default URLs are disabled, and both services accept ingress only from
+internal sources and Cloud Load Balancing.
+
+## Prerequisites
+
+Authenticate `gcloud` as a release identity and select a project whose required
+resources already exist. Enable these APIs separately from the release scripts:
+
+- `run.googleapis.com`
+- `sqladmin.googleapis.com`
+- `secretmanager.googleapis.com`
+- `storage.googleapis.com`
+- `artifactregistry.googleapis.com`
+- `cloudbuild.googleapis.com`
+- `compute.googleapis.com`
+
+Create the Artifact Registry repository once:
+
+```bash
+gcloud artifacts repositories create buglens \
+  --repository-format=docker \
+  --location="$GCP_REGION" \
+  --project="$GCP_PROJECT_ID"
+```
+
+Cloud SQL, the evidence bucket, service accounts, Secret Manager secrets, and
+their IAM bindings must also exist before the first release.
+
+## Release workflow
+
+Use this order for every production release:
+
+1. Confirm Artifact Registry, Cloud SQL, GCS, service accounts, and secrets exist.
+2. Build and push both immutable images with `./ops/gcp/build-images.sh`.
+3. Export the returned `API_IMAGE_URI` and `WEB_IMAGE_URI` values.
+4. Deploy the migration job with `./ops/gcp/deploy-migration-job.sh`.
+5. Run migrations explicitly with `./ops/gcp/run-migrations.sh`.
+6. Deploy the API with `./ops/gcp/deploy-api.sh`.
+7. Deploy the web service with `./ops/gcp/deploy-web.sh`.
+8. Reconcile the load balancer with `./ops/gcp/configure-load-balancer.sh`.
+9. Add or update the DNS A record printed by the load-balancer script.
+10. Wait for the Google-managed certificate to become `ACTIVE`.
+11. Run `./ops/gcp/verify-production.sh`.
+
+Migrations never run during API startup. Schema changes must remain
+backward-compatible with the API revision serving traffic during rollout.
+
+## Build configuration
+
+`build-images.sh` requires `GCP_PROJECT_ID` and `GCP_REGION`. It derives a full
+40-character `GIT_SHA` from `git rev-parse HEAD`, unless an explicit full SHA is
+provided, and submits both Docker contexts to Cloud Build. The default Artifact
+Registry repository is `ARTIFACT_REPOSITORY=buglens`.
+
+The resulting immutable references have these shapes:
 
 ```text
 REGION-docker.pkg.dev/PROJECT/buglens/buglens-api:GIT_SHA
+REGION-docker.pkg.dev/PROJECT/buglens/buglens-web:GIT_SHA
 ```
 
-Do not use `latest` for production releases.
+Do not use mutable `latest` tags for production releases.
 
-## Release sequence
+## Cloud Run deployment configuration
 
-1. Build and push one immutable API image outside these scripts.
-2. Set the variables below and run `./ops/gcp/deploy-migration-job.sh` with that image.
-3. Run `./ops/gcp/run-migrations.sh` and wait for it to succeed.
-4. Run `./ops/gcp/deploy-api.sh` with the same image.
+All deployment scripts require `GCP_PROJECT_ID` and `GCP_REGION`.
 
-Migration execution is deliberately separate from both job deployment and API
-deployment. Schema changes must remain backward-compatible with the API revision
-serving traffic during the rollout.
+The API and migration job both require the exact same `API_IMAGE_URI`. The API
+also requires:
 
-## Configuration
-
-All scripts require `GCP_PROJECT_ID` and `GCP_REGION`. Deployment scripts also
-require `IMAGE_URI`, `CLOUD_SQL_INSTANCE`, and their respective service account:
-
-- `RUNTIME_SERVICE_ACCOUNT` for the API
-- `MIGRATION_SERVICE_ACCOUNT` for migrations
-
-`CLOUD_SQL_INSTANCE` uses the `PROJECT:REGION:INSTANCE` connection name. The API
-deployment additionally requires:
-
+- `RUNTIME_SERVICE_ACCOUNT`
+- `CLOUD_SQL_INSTANCE` in `PROJECT:REGION:INSTANCE` form
 - `GCS_BUCKET`
-- `APP_BASE_URL` without a trailing slash (for production,
-  `https://app.buglens.ai`)
+- `APP_BASE_URL=https://app.buglens.ai` without a trailing slash
 - `GITHUB_APP_ID`
 - `GITHUB_APP_SLUG`
 
-The API deployment derives `FRONTEND_BASE_URL`, `BACKEND_BASE_URL`, and
-`GITHUB_CALLBACK_URL` from `APP_BASE_URL` so the public URL configuration cannot
-drift. It also selects the Cloud Run second-generation execution environment.
+The API derives its frontend, backend, and GitHub OAuth callback URLs from
+`APP_BASE_URL`. It keeps the existing Cloud SQL attachment, GCS backend,
+database pool settings, secure session cookie, GitHub PEM file mount, and
+`PLAYWRIGHT_ALLOW_PRIVATE_NETWORK=false`. Its startup and liveness probes call
+`/health`; readiness calls `/ready`.
 
-Optional resource settings and their defaults are:
+The web deployment requires `WEB_IMAGE_URI` and
+`WEB_RUNTIME_SERVICE_ACCOUNT`. It has no Cloud SQL attachment, storage access,
+application secrets, or API-host environment variable. Its standalone image
+uses the relative `/api` default. Startup and liveness probes call `/health`.
+
+Optional Cloud Run names and sizing defaults are:
 
 - `CLOUD_RUN_SERVICE=buglens-api`
+- `WEB_CLOUD_RUN_SERVICE=buglens-web`
 - `MIGRATION_JOB_NAME=buglens-migrate`
-- `CLOUD_RUN_CPU=2`
-- `CLOUD_RUN_MEMORY=2Gi`
-- `CLOUD_RUN_CONCURRENCY=4`
-- `CLOUD_RUN_MIN_INSTANCES=0`
-- `CLOUD_RUN_MAX_INSTANCES=5`
-- `CLOUD_RUN_TIMEOUT=900`
+- API: `CLOUD_RUN_CPU=2`, `CLOUD_RUN_MEMORY=2Gi`,
+  `CLOUD_RUN_CONCURRENCY=4`, `CLOUD_RUN_MIN_INSTANCES=0`,
+  `CLOUD_RUN_MAX_INSTANCES=5`, `CLOUD_RUN_TIMEOUT=900`
+- Web: `WEB_CLOUD_RUN_CPU=1`, `WEB_CLOUD_RUN_MEMORY=512Mi`,
+  `WEB_CLOUD_RUN_CONCURRENCY=80`, `WEB_CLOUD_RUN_MIN_INSTANCES=0`,
+  `WEB_CLOUD_RUN_MAX_INSTANCES=5`, `WEB_CLOUD_RUN_TIMEOUT=300`
 
-The scripts always pass the project and region explicitly and use non-interactive
-`gcloud` commands. Cloud Run supplies `PORT`; do not configure it here.
-The API deployment configures `/health` for startup and liveness checks and
-`/ready` for database-backed readiness checks.
+Cloud Run supplies `PORT`; do not configure it in deployment scripts.
 
 ## Secret Manager
 
-Create and manage the following secret IDs outside these scripts:
+Create and manage these secret IDs outside the scripts:
 
 - `buglens-database-url`
 - `buglens-session-secret`
@@ -71,7 +127,7 @@ Create and manage the following secret IDs outside these scripts:
 - `buglens-github-client-secret`
 - `buglens-gemini-api-key`
 
-Supply each secret ID and a pinned numeric version separately:
+Supply every secret ID and a pinned numeric version separately:
 
 - `DATABASE_URL_SECRET` and `DATABASE_URL_SECRET_VERSION`
 - `SESSION_SECRET_SECRET` and `SESSION_SECRET_SECRET_VERSION`
@@ -80,68 +136,101 @@ Supply each secret ID and a pinned numeric version separately:
 - `GITHUB_CLIENT_SECRET_SECRET` and `GITHUB_CLIENT_SECRET_SECRET_VERSION`
 - `GEMINI_API_KEY_SECRET` and `GEMINI_API_KEY_SECRET_VERSION`
 
-Versions such as `1`, `2`, or `3` are required; the scripts reject `latest`.
-Secret contents are never read or expanded by the deployment scripts. The
-GitHub App private key is mounted at
-`/var/secrets/buglens/github-private-key.pem` and is not exposed as an
-environment variable.
+Versions such as `1`, `2`, or `3` are required; `latest` is rejected. The GitHub
+private key is mounted at `/var/secrets/buglens/github-private-key.pem`, never
+placed in an environment variable.
 
-Add secret versions from standard input so values do not appear in command-line
+Add secret versions through standard input so values do not appear in command
 arguments:
 
-```sh
+```bash
 printf '%s' "$VALUE" | gcloud secrets versions add SECRET --data-file=-
 ```
 
-Never add a version with
-`gcloud secrets versions add ... --data-file=<committed-secret-file>` when the
-file could enter Git history. Do not store production values in committed `.env`
-files.
-
-The production database URL exists only in Secret Manager and has this shape:
+Never use a potentially committed secret file as `--data-file`, and never put
+production secrets in committed `.env` files. The database URL lives only in
+Secret Manager and has this shape:
 
 ```text
 postgresql+psycopg://USER:PASSWORD@/buglens?host=/cloudsql/PROJECT:REGION:INSTANCE
 ```
 
-## IAM prerequisites
+## IAM
 
-Grant permissions before using the scripts; the scripts never grant these roles.
+The scripts do not grant IAM roles.
 
-The runtime service account needs:
+The API runtime service account needs Cloud SQL Client, Secret Manager Secret
+Accessor on only the six BugLens secrets, and bucket-level
+`roles/storage.objectUser` on only the evidence bucket.
 
-- Cloud SQL Client (`roles/cloudsql.client`)
-- Secret Manager Secret Accessor (`roles/secretmanager.secretAccessor`) on only
-  the six BugLens secrets
-- `roles/storage.objectUser` on only the configured evidence bucket
+The migration service account needs Cloud SQL Client and Secret Manager Secret
+Accessor only for the database URL. It does not need GCS, GitHub, or Gemini
+access.
 
-The migration service account needs only:
+The separate web runtime service account needs no application resource roles.
+It does not need Cloud SQL Client, Secret Manager access, Storage Object User,
+Gemini access, or GitHub access.
 
-- Cloud SQL Client (`roles/cloudsql.client`)
-- Secret Manager Secret Accessor (`roles/secretmanager.secretAccessor`) on only
-  the database URL secret
+The release identity needs permission to submit Cloud Builds, deploy Cloud Run
+services and jobs, reconcile the Compute load-balancer resources, and act as the
+selected runtime and migration service accounts. Use user credentials or
+service-account impersonation through `gcloud`; do not create service-account
+keys.
 
-It does not need Cloud Storage, GitHub, or Gemini access. The deployment identity
-also needs permission to deploy Cloud Run resources and act as the selected
-runtime and migration service accounts.
+Both browser-facing services deliberately allow unauthenticated invocation.
+Restricted ingress prevents direct internet bypass while the load balancer can
+invoke them. BugLens session authorization continues to protect user data.
 
-Browser requests do not use Cloud Run authentication, so the service remains
-publicly reachable at this stage. BugLens application and session authorization
-continues to protect user data.
+## Load balancer and DNS
 
-## Canonical URL contract
+`configure-load-balancer.sh` requires `GCP_PROJECT_ID` and `GCP_REGION`. Both
+Cloud Run services and their serverless NEGs must use that same region. Defaults
+are:
 
-Production uses one public origin. The frontend owns normal page routes and the
-load balancer preserves and sends `/api/*` paths to FastAPI:
+- NEGs: `buglens-web-neg`, `buglens-api-neg`
+- backend services: `buglens-web-backend`, `buglens-api-backend`
+- URL maps: `buglens-url-map`, `buglens-http-redirect`
+- proxies: `buglens-https-proxy`, `buglens-http-proxy`
+- forwarding rules: `buglens-https`, `buglens-http`
+- global IPv4 address: `buglens-ip`
+- managed certificate: `buglens-app-cert`
+- domain: `APP_DOMAIN=app.buglens.ai`
 
-- `https://app.buglens.ai/`
-- `https://app.buglens.ai/projects`
-- `https://app.buglens.ai/investigations/...`
-- `https://app.buglens.ai/api/github/...`
-- `https://app.buglens.ai/api/projects`
-- `https://app.buglens.ai/api/investigations/...`
-- `https://app.buglens.ai/api/github/oauth/callback`
+The script is rerunnable: it creates missing named resources and validates
+existing ones before reuse. It fails on conflicting service, backend, routing,
+proxy, address, certificate, or forwarding-rule configuration. It does not
+rewrite URLs, enable Cloud CDN, or mutate DNS.
 
-Cloud Run default service URLs are implementation details and must not be used
-by the frontend. Cloud Run probes continue to call `/health` and `/ready`
-directly, outside the `/api` product namespace.
+External Application Load Balancer backend services using serverless NEGs do
+not use Compute Engine health checks. Cloud Run startup, liveness, and readiness
+probes remain responsible for revision health.
+
+After the script prints the reserved IPv4 address, add this record with the DNS
+provider:
+
+```text
+app.buglens.ai  A  LOAD_BALANCER_IPV4
+```
+
+Google-managed certificate provisioning can remain `PROVISIONING` until DNS
+points to the load balancer, and can take time to become `ACTIVE`. Inspect it
+with:
+
+```bash
+gcloud compute ssl-certificates describe "$SSL_CERTIFICATE_NAME" \
+  --project="$GCP_PROJECT_ID" \
+  --global \
+  --format='yaml(managed.status,managed.domainStatus)'
+```
+
+The load balancer uses one Premium-tier global IPv4 address. Port 443 terminates
+TLS; port 80 only performs a permanent HTTP-to-HTTPS redirect while preserving
+the host, path, and query string.
+
+## Production verification
+
+Set `APP_BASE_URL=https://app.buglens.ai` and run
+`./ops/gcp/verify-production.sh`. It uses bounded requests to verify the web
+health endpoint, web root, unauthenticated GitHub connection status through the
+`/api` route, and the HTTP-to-HTTPS redirect. API `/ready` remains an internal
+Cloud Run probe and is intentionally not exposed as `/api/ready`.
