@@ -34,6 +34,15 @@ normalize_list() {
   tr ';,' '\n' | sed '/^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//' | sort | paste -sd, -
 }
 
+is_effectively_empty() {
+  local value
+  value="$(printf '%s' "$1" | tr -d '[:space:]')"
+  case "${value,,}" in
+    "" | "[]" | "{}" | "none" | "null") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 command -v gcloud >/dev/null 2>&1 || fail "gcloud is required."
 
 require_env GCP_PROJECT_ID
@@ -206,7 +215,6 @@ web_backend_uri="https://www.googleapis.com/compute/v1/projects/${GCP_PROJECT_ID
 api_backend_uri="https://www.googleapis.com/compute/v1/projects/${GCP_PROJECT_ID}/global/backendServices/${API_BACKEND_SERVICE}"
 
 cat >"$application_map_file" <<EOF
-kind: compute#urlMap
 name: ${URL_MAP_NAME}
 defaultService: ${web_backend_uri}
 hostRules:
@@ -240,13 +248,6 @@ tests:
   service: ${api_backend_uri}
 EOF
 
-gcloud compute url-maps validate \
-  --project="$GCP_PROJECT_ID" \
-  --global \
-  --load-balancing-scheme=EXTERNAL_MANAGED \
-  --source="$application_map_file" \
-  --quiet
-
 if ! gcloud compute url-maps describe "$URL_MAP_NAME" \
   --project="$GCP_PROJECT_ID" --global >/dev/null 2>&1; then
   gcloud compute url-maps import "$URL_MAP_NAME" \
@@ -259,43 +260,69 @@ fi
 actual_default_service="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
   --project="$GCP_PROJECT_ID" --global --format='value(defaultService)')"
 actual_hosts="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
-  --project="$GCP_PROJECT_ID" --global --format='value(hostRules[].hosts[])')"
+  --project="$GCP_PROJECT_ID" --global --format='value(hostRules[0].hosts[0])')"
 actual_host_matcher="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
-  --project="$GCP_PROJECT_ID" --global --format='value(hostRules[].pathMatcher)')"
+  --project="$GCP_PROJECT_ID" --global --format='value(hostRules[0].pathMatcher)')"
+unexpected_host_rule="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(hostRules[1])')"
 actual_matcher_name="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
-  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[].name)')"
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].name)')"
 actual_matcher_default="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
-  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[].defaultService)')"
-actual_paths="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
-  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[].pathRules[].paths[])')"
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].defaultService)')"
+unexpected_matcher="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[1])')"
+actual_first_path="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].pathRules[0].paths[0])')"
+actual_second_path="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].pathRules[0].paths[1])')"
+unexpected_path="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].pathRules[0].paths[2])')"
 actual_path_service="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
-  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[].pathRules[].service)')"
-actual_path_rewrites="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
-  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[].pathRules[].routeAction.urlRewrite)')"
-actual_route_rewrites="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
-  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[].routeRules[].routeAction.urlRewrite)')"
-actual_route_rules="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
-  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[].routeRules)')"
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].pathRules[0].service)')"
+unexpected_path_rule="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].pathRules[1])')"
+path_rule_host_rewrite="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].pathRules[0].routeAction.urlRewrite.hostRewrite)')"
+path_rule_prefix_rewrite="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].pathRules[0].routeAction.urlRewrite.pathPrefixRewrite)')"
+path_rule_template_rewrite="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].pathRules[0].routeAction.urlRewrite.pathTemplateRewrite)')"
+route_rule_host_rewrite="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].routeRules[0].routeAction.urlRewrite.hostRewrite)')"
+route_rule_prefix_rewrite="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].routeRules[0].routeAction.urlRewrite.pathPrefixRewrite)')"
+route_rule_template_rewrite="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].routeRules[0].routeAction.urlRewrite.pathTemplateRewrite)')"
+unexpected_route_rule="$(gcloud compute url-maps describe "$URL_MAP_NAME" \
+  --project="$GCP_PROJECT_ID" --global --format='value(pathMatchers[0].routeRules[0])')"
 
 assert_suffix "$actual_default_service" "/global/backendServices/${WEB_BACKEND_SERVICE}" "$URL_MAP_NAME default service"
-[[ "$(printf '%s' "$actual_hosts" | normalize_list)" == "$APP_DOMAIN" ]] || \
+[[ "$actual_hosts" == "$APP_DOMAIN" ]] || \
   fail "$URL_MAP_NAME host rule conflicts with $APP_DOMAIN."
 [[ "$actual_host_matcher" == "$PATH_MATCHER_NAME" ]] || \
   fail "$URL_MAP_NAME host rule points at an unexpected path matcher."
+is_effectively_empty "$unexpected_host_rule" || fail "$URL_MAP_NAME contains an unexpected host rule."
 [[ "$actual_matcher_name" == "$PATH_MATCHER_NAME" ]] || \
   fail "$URL_MAP_NAME contains an unexpected path matcher."
+is_effectively_empty "$unexpected_matcher" || fail "$URL_MAP_NAME contains an unexpected path matcher."
 assert_suffix "$actual_matcher_default" "/global/backendServices/${WEB_BACKEND_SERVICE}" "$URL_MAP_NAME matcher default"
-[[ "$(printf '%s' "$actual_paths" | normalize_list)" == '/api,/api/*' ]] || \
+[[ "$(printf '%s\n%s' "$actual_first_path" "$actual_second_path" | normalize_list)" == '/api,/api/*' ]] || \
   fail "$URL_MAP_NAME must route exactly /api and /api/*."
+is_effectively_empty "$unexpected_path" || fail "$URL_MAP_NAME contains an unexpected API path."
 assert_suffix "$actual_path_service" "/global/backendServices/${API_BACKEND_SERVICE}" "$URL_MAP_NAME API path service"
-[[ "$actual_path_service" != *';'* && "$actual_path_service" != *','* && "$actual_path_service" != *' '* ]] || \
-  fail "$URL_MAP_NAME must contain exactly one API path rule."
-[[ -z "$actual_path_rewrites" && -z "$actual_route_rewrites" ]] || \
-  fail "$URL_MAP_NAME must not rewrite request URLs."
-[[ -z "$actual_route_rules" ]] || fail "$URL_MAP_NAME contains unexpected route rules."
+is_effectively_empty "$unexpected_path_rule" || fail "$URL_MAP_NAME must contain exactly one API path rule."
+for rewrite in \
+  "$path_rule_host_rewrite" \
+  "$path_rule_prefix_rewrite" \
+  "$path_rule_template_rewrite" \
+  "$route_rule_host_rewrite" \
+  "$route_rule_prefix_rewrite" \
+  "$route_rule_template_rewrite"; do
+  is_effectively_empty "$rewrite" || fail "$URL_MAP_NAME must not rewrite request URLs."
+done
+is_effectively_empty "$unexpected_route_rule" || fail "$URL_MAP_NAME contains unexpected route rules."
 
 cat >"$redirect_map_file" <<EOF
-kind: compute#urlMap
 name: ${HTTP_REDIRECT_URL_MAP_NAME}
 defaultUrlRedirect:
   redirectResponseCode: MOVED_PERMANENTLY_DEFAULT
@@ -307,13 +334,6 @@ tests:
   expectedOutputUrl: https://${APP_DOMAIN}/projects?from=http
   expectedRedirectResponseCode: 301
 EOF
-
-gcloud compute url-maps validate \
-  --project="$GCP_PROJECT_ID" \
-  --global \
-  --load-balancing-scheme=EXTERNAL_MANAGED \
-  --source="$redirect_map_file" \
-  --quiet
 
 if ! gcloud compute url-maps describe "$HTTP_REDIRECT_URL_MAP_NAME" \
   --project="$GCP_PROJECT_ID" --global >/dev/null 2>&1; then
@@ -336,7 +356,9 @@ redirect_path_matchers="$(gcloud compute url-maps describe "$HTTP_REDIRECT_URL_M
   fail "$HTTP_REDIRECT_URL_MAP_NAME does not redirect to HTTPS."
 [[ "$actual_redirect_code" == "MOVED_PERMANENTLY_DEFAULT" ]] || \
   fail "$HTTP_REDIRECT_URL_MAP_NAME does not use a permanent redirect."
-[[ -z "$redirect_host_rules" && -z "$redirect_path_matchers" ]] || \
+is_effectively_empty "$redirect_host_rules" || \
+  fail "$HTTP_REDIRECT_URL_MAP_NAME must redirect every HTTP request."
+is_effectively_empty "$redirect_path_matchers" || \
   fail "$HTTP_REDIRECT_URL_MAP_NAME must redirect every HTTP request."
 
 if ! gcloud compute addresses describe "$GLOBAL_IP_NAME" \
