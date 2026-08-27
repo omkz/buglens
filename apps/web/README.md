@@ -13,9 +13,10 @@ Next.js in development to `http://localhost:8000/api/*`.
 
 ## Production routing
 
-The production load balancer routes `https://app.buglens.ai/*` to the web Cloud
-Run service and `https://app.buglens.ai/api/*` to the API Cloud Run service. The
-frontend uses the relative `/api` base and does not require a backend hostname.
+The production load balancer routes `https://buglens.hakooi.com/*` to the web
+Cloud Run service and `https://buglens.hakooi.com/api/*` to the API Cloud Run
+service. The frontend uses the relative `/api` base and does not require a
+backend hostname.
 
 ## Container
 

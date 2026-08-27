@@ -23,12 +23,12 @@ paths. Local Next.js development proxies `/api/*` to the API process on port
 8000.
 
 The GCP deployment script derives the three public URL settings from
-`APP_BASE_URL=https://app.buglens.ai`. The resulting Cloud Run configuration
+`APP_BASE_URL=https://buglens.hakooi.com`. The resulting Cloud Run configuration
 contains:
 
-- `FRONTEND_BASE_URL=https://app.buglens.ai`
-- `BACKEND_BASE_URL=https://app.buglens.ai/api`
-- `GITHUB_CALLBACK_URL=https://app.buglens.ai/api/github/oauth/callback`
+- `FRONTEND_BASE_URL=https://buglens.hakooi.com`
+- `BACKEND_BASE_URL=https://buglens.hakooi.com/api`
+- `GITHUB_CALLBACK_URL=https://buglens.hakooi.com/api/github/oauth/callback`
 - `GITHUB_APP_ID`
 - `GITHUB_APP_SLUG`
 - `LOG_LEVEL`
