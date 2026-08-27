@@ -13,8 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "BugLens",
-  description: "Autonomous bug investigation agent",
+  title: "BugLens — Autonomous Bug Investigation",
+  description:
+    "BugLens analyzes bug evidence, investigates GitHub repositories, and reproduces issues with Playwright.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
