@@ -23,6 +23,7 @@ Authenticate `gcloud` as a release identity and select a project whose required
 resources already exist. Enable these APIs separately from the release scripts:
 
 - `run.googleapis.com`
+- `aiplatform.googleapis.com`
 - `sqladmin.googleapis.com`
 - `secretmanager.googleapis.com`
 - `storage.googleapis.com`
