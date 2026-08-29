@@ -18,7 +18,7 @@ export function GithubConnection({ info }: { info: GithubConnectionInfo }) {
     setError(null);
     setIsRedirecting(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/github/install-url`, {
+      const response = await fetch(`${API_BASE_URL}/github/connect-url`, {
         credentials: "include",
       });
       if (!response.ok) {

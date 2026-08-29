@@ -28,6 +28,32 @@ _SESSION_OAUTH_STATE_KEY = "github_oauth_state"
 _SESSION_CONNECTION_ID_KEY = "github_connection_id"
 
 
+def _store_oauth_state(request: Request) -> str:
+    state = secrets.token_urlsafe(24)
+    request.session[_SESSION_OAUTH_STATE_KEY] = state
+    return state
+
+
+@router.get("/connect-url")
+def get_connect_url(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    if not settings.github_client_id or not settings.github_app_slug:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub App is not configured on this server.",
+        )
+
+    state = _store_oauth_state(request)
+    url = github_client.build_user_authorization_url(
+        client_id=settings.github_client_id,
+        redirect_uri=settings.github_callback_url,
+        state=state,
+    )
+    return {"url": url}
+
+
 @router.get("/install-url")
 def get_install_url(
     request: Request,
@@ -39,8 +65,7 @@ def get_install_url(
             detail="GitHub App is not configured on this server.",
         )
 
-    state = secrets.token_urlsafe(24)
-    request.session[_SESSION_OAUTH_STATE_KEY] = state
+    state = _store_oauth_state(request)
 
     url = github_client.build_install_url(
         app_slug=settings.github_app_slug,
@@ -148,9 +173,8 @@ async def github_oauth_callback(
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
     # GitHub also sends installation_id and setup_action here when "Request
-    # user authorization (OAuth) during installation" is enabled. They are
-    # accepted for logging only — never trusted for the connection decision.
-    # See the verification against /user/installations below.
+    # user authorization (OAuth) during installation" is enabled. They remain
+    # untrusted hints and are verified against /user/installations below.
     installation_id: int | None = Query(default=None),
     setup_action: str | None = Query(default=None),
     settings: Settings = Depends(get_settings),
@@ -167,7 +191,11 @@ async def github_oauth_callback(
     # Single-use: pop the expected state so it can never be replayed,
     # whether or not it ends up matching.
     expected_state = request.session.pop(_SESSION_OAUTH_STATE_KEY, None)
-    if not expected_state or not state or expected_state != state:
+    if (
+        not expected_state
+        or not state
+        or not secrets.compare_digest(expected_state, state)
+    ):
         logger.warning("github_oauth_invalid_state")
         return RedirectResponse(f"{redirect_target}?github_error=invalid_state")
 
@@ -182,16 +210,16 @@ async def github_oauth_callback(
             code=code,
             redirect_uri=settings.github_callback_url,
         )
-        user = await github_client.fetch_authenticated_user(access_token)
-        installations = await github_client.fetch_user_installations(access_token)
+        try:
+            user = await github_client.fetch_authenticated_user(access_token)
+            installations = await github_client.fetch_user_installations(
+                access_token
+            )
+        finally:
+            del access_token
     except (httpx.HTTPError, github_client.GitHubOAuthError):
         logger.exception("github_oauth_failed")
         return RedirectResponse(f"{redirect_target}?github_error=oauth_failed")
-
-    # The access token is only needed for the three calls above. It is
-    # never persisted or stored in the session, so drop the reference now
-    # rather than letting it linger for the rest of the request.
-    del access_token
 
     # Never trust a raw installation_id from a query parameter: only accept
     # an installation the authenticated user's own token can see, verified
@@ -203,6 +231,21 @@ async def github_oauth_callback(
             requested_installation_id=installation_id,
         )
     except InstallationSelectionError as exc:
+        if (
+            exc.code == "app_not_installed"
+            and installation_id is None
+            and setup_action is None
+        ):
+            install_state = _store_oauth_state(request)
+            install_url = github_client.build_install_url(
+                app_slug=settings.github_app_slug,
+                state=install_state,
+            )
+            logger.info(
+                "github_installation_required",
+                github_username=user.login,
+            )
+            return RedirectResponse(install_url)
         logger.warning(
             "github_installation_selection_failed",
             github_username=user.login,

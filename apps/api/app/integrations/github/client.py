@@ -16,6 +16,7 @@ import httpx
 import jwt
 
 GITHUB_INSTALL_BASE_URL = "https://github.com/apps"
+GITHUB_OAUTH_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_API_BASE_URL = "https://api.github.com"
 
@@ -87,6 +88,20 @@ def build_install_url(*, app_slug: str, state: str) -> str:
     """
     query = urlencode({"state": state})
     return f"{GITHUB_INSTALL_BASE_URL}/{app_slug}/installations/new?{query}"
+
+
+def build_user_authorization_url(
+    *, client_id: str, redirect_uri: str, state: str
+) -> str:
+    """Build a GitHub user OAuth URL without requesting additional scopes."""
+    query = urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": state,
+        }
+    )
+    return f"{GITHUB_OAUTH_AUTHORIZE_URL}?{query}"
 
 
 async def exchange_code_for_token(
