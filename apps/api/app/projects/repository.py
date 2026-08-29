@@ -1,4 +1,4 @@
-"""Persistence operations for installation-owned BugLens projects."""
+"""Persistence operations for installation-owned Buglensa projects."""
 
 from __future__ import annotations
 

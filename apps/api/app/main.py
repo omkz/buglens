@@ -30,7 +30,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(
-    title="BugLens API",
+    title="Buglensa API",
     lifespan=lifespan,
 )
 

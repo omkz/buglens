@@ -1,4 +1,4 @@
-# BugLens web
+# Buglensa web
 
 ## Local development
 

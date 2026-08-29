@@ -275,7 +275,7 @@ def test_issue_formatter_bounds_and_safely_truncates_generated_test():
     draft = build_github_issue(context)
 
     assert len(draft.body) <= MAX_ISSUE_BODY_CHARACTERS
-    assert "generated test truncated by BugLens" in draft.body
+    assert "generated test truncated by Buglensa" in draft.body
     assert draft.marker in draft.body
     assert draft.body.endswith(draft.marker)
 
@@ -285,17 +285,17 @@ def test_issue_formatter_bounds_and_safely_truncates_generated_test():
     [
         (
             "reproduced",
-            "BugLens reproduced the reported failure during the browser reproduction attempt.",
+            "Buglensa reproduced the reported failure during the browser reproduction attempt.",
         ),
         (
             "not_reproduced",
-            "BugLens did not reproduce the reported failure during this attempt.",
+            "Buglensa did not reproduce the reported failure during this attempt.",
         ),
         (
             "blocked",
-            "BugLens could not make a reliable reproduction determination.",
+            "Buglensa could not make a reliable reproduction determination.",
         ),
-        (None, "BugLens did not run a browser reproduction attempt."),
+        (None, "Buglensa did not run a browser reproduction attempt."),
     ],
 )
 def test_issue_formatter_uses_factual_reproduction_wording(status, wording):

@@ -38,7 +38,7 @@ jobs:
         run: uv run pytest
 
       - name: Check application import
-        run: uv run python -c "from app.main import app; assert app.title == 'BugLens API'"
+        run: uv run python -c "from app.main import app; assert app.title == 'Buglensa API'"
 
       - name: Validate GCP deployment scripts
         run: bash -n ../../ops/gcp/*.sh

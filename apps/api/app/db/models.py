@@ -47,7 +47,7 @@ class User(Base):
 class GitHubInstallation(Base):
     """A GitHub App installation on some GitHub account/org.
 
-    Not owned by a single BugLens user -- GitHubConnection is what links a
+    Not owned by a single Buglensa user -- GitHubConnection is what links a
     User to the installation(s) they've connected, since the same
     installation could in principle be visible to more than one user.
     """
@@ -75,7 +75,7 @@ class GitHubInstallation(Base):
 
 
 class GitHubConnection(Base):
-    """Links a BugLens User to a GitHubInstallation they've connected.
+    """Links a Buglensa User to a GitHubInstallation they've connected.
 
     Modeled as its own association object (not a bare many-to-many table)
     so it has an id the browser session can reference directly, and its
@@ -111,7 +111,7 @@ class GitHubConnection(Base):
 
 
 class Project(Base):
-    """A BugLens project backed by a repository in an App installation."""
+    """A Buglensa project backed by a repository in an App installation."""
 
     __tablename__ = "projects"
     __table_args__ = (
@@ -153,7 +153,7 @@ class InvestigationStatus(StrEnum):
 
 
 class Investigation(Base):
-    """A persisted bug report belonging to a BugLens Project."""
+    """A persisted bug report belonging to a Buglensa Project."""
 
     __tablename__ = "investigations"
     __table_args__ = (

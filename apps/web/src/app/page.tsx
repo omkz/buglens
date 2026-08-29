@@ -10,13 +10,13 @@ const steps = [
     number: "02",
     title: "Investigate",
     description:
-      "Gemini and the BugLens agent analyze the evidence and inspect the connected GitHub repository.",
+      "Gemini and the Buglensa agent analyze the evidence and inspect the connected GitHub repository.",
   },
   {
     number: "03",
     title: "Reproduce",
     description:
-      "BugLens builds a constrained Playwright plan and attempts to reproduce the bug.",
+      "Buglensa builds a constrained Playwright plan and attempts to reproduce the bug.",
   },
   {
     number: "04",
@@ -33,7 +33,7 @@ const boundaries = [
   "Explicit approval before issue creation",
 ];
 
-const githubUrl = "https://github.com/omkz/buglens";
+const githubUrl = "https://github.com/omkz/buglensa";
 
 function Wordmark() {
   return (
@@ -45,7 +45,7 @@ function Wordmark() {
         B
       </span>
       <span className="text-sm font-semibold tracking-tight text-zinc-50">
-        BugLens
+        Buglensa
       </span>
     </span>
   );
@@ -56,7 +56,7 @@ export default function Home() {
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <header className="border-b border-zinc-900">
         <nav className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between px-5 sm:px-6">
-          <Link href="/" aria-label="BugLens home">
+          <Link href="/" aria-label="Buglensa home">
             <Wordmark />
           </Link>
 
@@ -88,7 +88,7 @@ export default function Home() {
             <h1 className="text-balance text-4xl font-semibold leading-[1.08] tracking-[-0.035em] text-zinc-50 sm:text-6xl lg:text-7xl">
               Show the bug.
               <br />
-              BugLens investigates, reproduces, and routes it.
+              Buglensa investigates, reproduces, and routes it.
             </h1>
             <p className="mt-7 max-w-2xl text-lg leading-8 text-zinc-400 sm:text-xl">
               Turn screen recordings, voice context, and logs into reproduced,
@@ -153,7 +153,7 @@ export default function Home() {
                   Investigation is autonomous. Publishing is not.
                 </h2>
                 <p className="mt-3 max-w-lg text-sm leading-6 text-zinc-500">
-                  BugLens can inspect, reason, and reproduce within defined tool
+                  Buglensa can inspect, reason, and reproduce within defined tool
                   boundaries. You stay in control of what reaches GitHub.
                 </p>
               </div>
@@ -180,7 +180,7 @@ export default function Home() {
       <footer className="border-t border-zinc-900">
         <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-5 py-7 text-sm sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <p className="text-zinc-500">
-            <span className="font-medium text-zinc-300">BugLens</span>
+            <span className="font-medium text-zinc-300">Buglensa</span>
             <span className="mx-2 text-zinc-700">·</span>
             Built for the All Things Agentic Hackathon.
           </p>

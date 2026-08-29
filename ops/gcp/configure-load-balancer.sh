@@ -26,7 +26,7 @@ assert_suffix() {
   local expected_suffix="$2"
   local description="$3"
   if [[ "$actual" != *"$expected_suffix" ]]; then
-    fail "$description conflicts with the expected BugLens architecture."
+    fail "$description conflicts with the expected Buglensa architecture."
   fi
 }
 

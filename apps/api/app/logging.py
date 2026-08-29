@@ -1,6 +1,6 @@
 """Centralized structlog + stdlib logging configuration.
 
-Configured once at application startup (see app/main.py) so BugLens' own
+Configured once at application startup (see app/main.py) so Buglensa's own
 structlog loggers and the stdlib loggers used by FastAPI/Uvicorn share one
 consistent rendering pipeline: human-readable locally, single-line JSON on
 Cloud Run. Always writes to stdout — no log files.
@@ -73,7 +73,7 @@ class _RedactSensitiveDataFilter(logging.Filter):
     """Strips known-sensitive query-string values from raw log records.
 
     Applied at the shared handler so it covers every integrated log
-    source (BugLens, FastAPI, Uvicorn) uniformly, without any of them
+    source (Buglensa, FastAPI, Uvicorn) uniformly, without any of them
     needing to know about redaction themselves. This handles *unstructured*
     text such as Uvicorn's access log line; structured event fields are
     handled separately by redact_sensitive_fields below.

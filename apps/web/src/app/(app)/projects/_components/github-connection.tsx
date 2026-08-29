@@ -66,7 +66,7 @@ export function GithubConnection({ info }: { info: GithubConnectionInfo }) {
           Connect GitHub to get started
         </p>
         <p className="max-w-sm text-sm text-zinc-500">
-          BugLens needs access to your repositories through the BugLens
+          Buglensa needs access to your repositories through the Buglensa
           GitHub App before you can create a project.
         </p>
       </div>

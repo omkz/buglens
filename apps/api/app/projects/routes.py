@@ -1,4 +1,4 @@
-"""Authenticated API routes for persisted BugLens projects."""
+"""Authenticated API routes for persisted Buglensa projects."""
 
 from __future__ import annotations
 

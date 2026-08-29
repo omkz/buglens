@@ -24,7 +24,7 @@ const GITHUB_ERROR_MESSAGES: Record<string, string> = {
   oauth_failed:
     "We couldn't complete the GitHub authorization. Please try again.",
   app_not_installed:
-    "Install the BugLens GitHub App for your account, then try connecting again.",
+    "Install the Buglensa GitHub App for your account, then try connecting again.",
 };
 
 export default function ProjectsPage() {

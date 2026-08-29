@@ -68,7 +68,7 @@ class GitHubToolContext:
             """List a bounded file tree for the fixed connected repository.
 
             Returns paths and sizes only. Repository, installation, and branch are
-            fixed by BugLens and cannot be selected by the caller.
+            fixed by Buglensa and cannot be selected by the caller.
             """
             if context._progress_callback is not None:
                 await context._progress_callback(

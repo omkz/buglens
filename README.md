@@ -1,9 +1,9 @@
-# BugLens
+# Buglensa
 
-**Show the bug. BugLens investigates, reproduces, and routes it.**
+**Show the bug. Buglensa investigates, reproduces, and routes it.**
 
-BugLens is an autonomous bug investigation agent. A user provides a screen
-recording, optional voice context, and logs. BugLens analyzes the evidence,
+Buglensa is an autonomous bug investigation agent. A user provides a screen
+recording, optional voice context, and logs. Buglensa analyzes the evidence,
 inspects the connected GitHub repository, searches for duplicate issues,
 creates a bounded reproduction plan, executes it with Playwright, and returns
 the investigation result with evidence.

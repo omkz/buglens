@@ -17,7 +17,7 @@ export function AppNav() {
         <Link
           href="/"
           className="flex items-center gap-2.5 sm:border-r sm:border-zinc-800 sm:pr-5"
-          aria-label="BugLens home"
+          aria-label="Buglensa home"
         >
           <span
             aria-hidden="true"
@@ -26,7 +26,7 @@ export function AppNav() {
             B
           </span>
           <span className="text-sm font-semibold tracking-tight text-zinc-50">
-            BugLens
+            Buglensa
           </span>
         </Link>
 
@@ -53,7 +53,7 @@ export function AppNav() {
         </ul>
 
         <a
-          href="https://github.com/omkz/buglens"
+          href="https://github.com/omkz/buglensa"
           target="_blank"
           rel="noreferrer"
           className="ml-auto text-sm font-medium text-zinc-500 transition-colors hover:text-zinc-200"

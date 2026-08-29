@@ -20,7 +20,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Create installation-owned BugLens projects."""
+    """Create installation-owned Buglensa projects."""
     op.create_table(
         "projects",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -58,5 +58,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop installation-owned BugLens projects."""
+    """Drop installation-owned Buglensa projects."""
     op.drop_table("projects")

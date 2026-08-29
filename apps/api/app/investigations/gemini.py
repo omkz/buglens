@@ -1,4 +1,4 @@
-"""Gemini implementation of BugLens's evidence-grounded bug analyzer."""
+"""Gemini implementation of Buglensa's evidence-grounded bug analyzer."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from .analyzer import (
 
 logger = structlog.get_logger(__name__)
 
-_SYSTEM_INSTRUCTION = """You are BugLens's bug evidence analyzer.
+_SYSTEM_INSTRUCTION = """You are Buglensa's bug evidence analyzer.
 
 Analyze screen recordings, spoken narration when present, the bug description,
 and application logs. Determine only what is supported by supplied evidence.
@@ -27,7 +27,7 @@ Extract a concise understanding of observed and expected behavior, ordered
 reproduction steps when established, error signals, likely affected UI or
 application components, confidence, and missing information.
 
-Do not invent reproduction steps or source-code causes. Do not claim BugLens
+Do not invent reproduction steps or source-code causes. Do not claim Buglensa
 reproduced the bug, inspected code, found or created an issue, or produced a fix.
 When evidence is insufficient, leave unsupported lists empty, lower confidence,
 set needs_more_information to true, and identify what evidence is missing.

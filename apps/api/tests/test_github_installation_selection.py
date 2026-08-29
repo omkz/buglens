@@ -41,7 +41,7 @@ def test_forged_or_unavailable_installation_id_is_rejected():
 
 def test_explicit_installation_id_with_wrong_app_id_is_rejected():
     # The installation exists and is genuinely the user's, but it belongs
-    # to a different app than the one configured for BugLens.
+    # to a different app than the one configured for Buglensa.
     installations = [make_installation(1, app_id=1)]
 
     with pytest.raises(InstallationSelectionError) as exc_info:

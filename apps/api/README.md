@@ -1,4 +1,4 @@
-# BugLens API
+# Buglensa API
 
 Local development remains uv-based and does not require Docker:
 

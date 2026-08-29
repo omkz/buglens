@@ -1,6 +1,6 @@
-# BugLens Google Cloud production release
+# Buglensa Google Cloud production release
 
-These scripts build immutable API and web images, deploy existing BugLens
+These scripts build immutable API and web images, deploy existing Buglensa
 resources, and reconcile the first-region production load balancer. They do not
 create Cloud SQL, Cloud Storage buckets, service accounts, IAM grants, secret
 contents, or DNS records. They never run automatically from CI.
@@ -160,7 +160,7 @@ postgresql+psycopg://USER:PASSWORD@/buglens?host=/cloudsql/PROJECT:REGION:INSTAN
 The scripts do not grant IAM roles.
 
 The API runtime service account needs Cloud SQL Client, Secret Manager Secret
-Accessor on only the six BugLens secrets, and bucket-level
+Accessor on only the six Buglensa secrets, and bucket-level
 `roles/storage.objectUser` on only the evidence bucket.
 
 The migration service account needs Cloud SQL Client and Secret Manager Secret
@@ -179,7 +179,7 @@ keys.
 
 Both browser-facing services deliberately allow unauthenticated invocation.
 Restricted ingress prevents direct internet bypass while the load balancer can
-invoke them. BugLens session authorization continues to protect user data.
+invoke them. Buglensa session authorization continues to protect user data.
 
 ## Load balancer and DNS
 
