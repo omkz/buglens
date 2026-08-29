@@ -4,9 +4,7 @@ import threading
 import uuid
 from io import BytesIO
 from pathlib import Path
-from tempfile import TemporaryDirectory as SystemTemporaryDirectory
 
-import anyio
 import pytest
 from fastapi import UploadFile
 from google.api_core.exceptions import GoogleAPIError, NotFound
@@ -326,29 +324,23 @@ async def test_gcs_delete_failure_is_backend_neutral():
 
 
 @pytest.mark.anyio
-async def test_gcs_materialize_uses_pinned_blob_and_removes_temporary_content():
+async def test_gcs_recording_source_is_validated_without_download():
     storage, bucket = _gcs_storage()
     key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
     blob = FakeBlob(key, generation=84)
-    blob.download_content = b"recording-content"
     bucket.get_blob_results[key] = blob
 
-    async with storage.materialize(key) as path:
-        materialized_path = path
-        temporary_directory = path.parent
-        assert path.suffix == ".webm"
-        assert path.read_bytes() == b"recording-content"
+    source = await storage.resolve_recording(key)
 
-    assert blob.download_paths == [materialized_path]
-    assert blob.generation == 84
+    assert source.file_uri == f"gs://test-bucket/{key}"
+    assert source.local_path is None
     assert bucket.get_blob_calls == [key]
-    assert bucket.requested_names == []
-    assert not materialized_path.exists()
-    assert not temporary_directory.exists()
+    assert blob.download_paths == []
+    assert blob.open_calls == []
 
 
 @pytest.mark.anyio
-async def test_missing_gcs_materialization_is_unavailable_before_download():
+async def test_missing_gcs_recording_source_is_safe_and_not_downloaded():
     storage, bucket = _gcs_storage()
     key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
     bucket.get_blob_results[key] = None
@@ -356,96 +348,10 @@ async def test_missing_gcs_materialization_is_unavailable_before_download():
     with pytest.raises(
         EvidenceStorageError, match="^Evidence content is unavailable\\.$"
     ):
-        async with storage.materialize(key):
-            pytest.fail("missing content must not be yielded")
+        await storage.resolve_recording(key)
 
     assert bucket.get_blob_calls == [key]
     assert bucket.requested_names == []
-
-
-@pytest.mark.anyio
-async def test_gcs_materialize_cleans_up_when_consumer_fails():
-    storage, bucket = _gcs_storage()
-    key = f"{uuid.uuid4()}/{uuid.uuid4()}.mp4"
-    bucket.blob(key).download_content = b"recording-content"
-    materialized_path: Path | None = None
-
-    with pytest.raises(RuntimeError, match="analysis failed"):
-        async with storage.materialize(key) as path:
-            materialized_path = path
-            raise RuntimeError("analysis failed")
-
-    assert materialized_path is not None
-    assert not materialized_path.exists()
-    assert not materialized_path.parent.exists()
-
-
-@pytest.mark.anyio
-async def test_gcs_materialize_cleanup_error_is_backend_neutral(
-    monkeypatch, tmp_path
-):
-    from app.investigations import evidence_storage
-
-    storage, bucket = _gcs_storage()
-    key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
-    bucket.blob(key).download_content = b"recording-content"
-
-    class CleanupFailure:
-        def __init__(self):
-            self.temporary_directory = SystemTemporaryDirectory(dir=tmp_path)
-            self.name = self.temporary_directory.name
-
-        def cleanup(self) -> None:
-            self.temporary_directory.cleanup()
-            raise OSError("private temporary path")
-
-    monkeypatch.setattr(evidence_storage, "TemporaryDirectory", CleanupFailure)
-
-    with pytest.raises(EvidenceStorageError, match="^Unable to read evidence\\.$"):
-        async with storage.materialize(key):
-            pass
-
-
-@pytest.mark.anyio
-async def test_gcs_materialize_cleans_up_after_cancellation():
-    storage, bucket = _gcs_storage()
-    key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
-    bucket.blob(key).download_content = b"recording-content"
-    path_ready = anyio.Event()
-    captured_path: Path | None = None
-
-    async def consume_materialized_content() -> None:
-        nonlocal captured_path
-        async with storage.materialize(key) as path:
-            captured_path = path
-            path_ready.set()
-            await anyio.sleep_forever()
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(consume_materialized_content)
-        await path_ready.wait()
-        task_group.cancel_scope.cancel()
-
-    assert captured_path is not None
-    assert not captured_path.exists()
-    assert not captured_path.parent.exists()
-
-
-@pytest.mark.anyio
-async def test_missing_gcs_materialization_cleans_temporary_directory():
-    storage, bucket = _gcs_storage()
-    key = f"{uuid.uuid4()}/{uuid.uuid4()}.webm"
-    blob = bucket.blob(key)
-    blob.download_error = NotFound("missing")
-
-    with pytest.raises(
-        EvidenceStorageError, match="^Evidence content is unavailable\\.$"
-    ):
-        async with storage.materialize(key):
-            pytest.fail("missing content must not be yielded")
-
-    assert len(blob.download_paths) == 1
-    assert not blob.download_paths[0].parent.exists()
 
 
 @pytest.mark.anyio
@@ -467,5 +373,7 @@ async def test_gcs_rejects_malformed_storage_keys(storage_key):
         await storage.open_content(storage_key)
     with pytest.raises(EvidenceStorageError, match="Invalid evidence storage key"):
         await storage.delete(storage_key)
+    with pytest.raises(EvidenceStorageError, match="Invalid evidence storage key"):
+        await storage.resolve_recording(storage_key)
 
     assert bucket.requested_names == []

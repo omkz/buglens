@@ -99,7 +99,7 @@ if [[ "$APP_BASE_URL" != https://* ]]; then
   exit 1
 fi
 
-if [[ "" == */ ]]; then
+if [[ "$APP_BASE_URL" == */ ]]; then
   printf 'error: APP_BASE_URL must not have a trailing slash.\n' >&2
   exit 1
 fi

@@ -81,13 +81,19 @@ class GeminiBugAnalyzer:
             client = self.client_factory(self.project, self.location)
             async_client = client.aio
             for recording in analysis_input.recordings:
-                data = await asyncio.to_thread(recording.path.read_bytes)
-                recording_parts.append(
-                    types.Part.from_bytes(
-                        data=data,
+                if recording.source.local_path is not None:
+                    data = await asyncio.to_thread(
+                        recording.source.local_path.read_bytes
+                    )
+                    part = types.Part.from_bytes(
+                        data=data, mime_type=recording.mime_type
+                    )
+                else:
+                    part = types.Part.from_uri(
+                        file_uri=recording.source.file_uri,
                         mime_type=recording.mime_type,
                     )
-                )
+                recording_parts.append(part)
 
             response = await async_client.models.generate_content(
                 model=self.model_name,

@@ -89,6 +89,33 @@ assert_contains "$gcloud_log" "PLAYWRIGHT_ALLOW_PRIVATE_NETWORK=false"
 assert_contains "$gcloud_log" "GOOGLE_CLOUD_PROJECT=test-project"
 assert_contains "$gcloud_log" "GOOGLE_CLOUD_LOCATION=global"
 
+if env \
+  PATH="$common_path" \
+  GCLOUD_LOG="$gcloud_log" \
+  GCP_PROJECT_ID=test-project \
+  GCP_REGION=us-central1 \
+  API_IMAGE_URI="$api_image" \
+  RUNTIME_SERVICE_ACCOUNT=api@test-project.iam.gserviceaccount.com \
+  CLOUD_SQL_INSTANCE=test-project:us-central1:buglens \
+  GCS_BUCKET=test-evidence \
+  APP_BASE_URL=https://app.buglens.ai/ \
+  GITHUB_APP_ID=123456 \
+  GITHUB_APP_SLUG=buglens \
+  DATABASE_URL_SECRET=buglens-database-url \
+  DATABASE_URL_SECRET_VERSION=1 \
+  SESSION_SECRET_SECRET=buglens-session-secret \
+  SESSION_SECRET_SECRET_VERSION=1 \
+  GITHUB_PRIVATE_KEY_SECRET=buglens-github-private-key \
+  GITHUB_PRIVATE_KEY_SECRET_VERSION=1 \
+  GITHUB_CLIENT_ID_SECRET=buglens-github-client-id \
+  GITHUB_CLIENT_ID_SECRET_VERSION=1 \
+  GITHUB_CLIENT_SECRET_SECRET=buglens-github-client-secret \
+  GITHUB_CLIENT_SECRET_SECRET_VERSION=1 \
+  "${script_directory}/deploy-api.sh" >/dev/null 2>&1; then
+  printf 'error: deploy-api.sh accepted APP_BASE_URL with a trailing slash.\n' >&2
+  exit 1
+fi
+
 : >"$gcloud_log"
 env \
   PATH="$common_path" \

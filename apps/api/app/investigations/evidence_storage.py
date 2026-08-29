@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import AsyncContextManager, BinaryIO, Protocol
+from typing import BinaryIO, Protocol
 
 import anyio
 from fastapi import UploadFile
@@ -46,6 +44,20 @@ class EvidenceContent:
     chunks: AsyncIterator[bytes]
 
 
+@dataclass(frozen=True)
+class RecordingSource:
+    """A validated recording location, represented by exactly one backend."""
+
+    local_path: Path | None = None
+    file_uri: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.local_path is None) == (self.file_uri is None):
+            raise ValueError(
+                "Recording source must have exactly one local path or file URI."
+            )
+
+
 class EvidenceStorage(Protocol):
     async def save_recording(
         self,
@@ -61,8 +73,7 @@ class EvidenceStorage(Protocol):
 
     async def open_content(self, storage_key: str) -> EvidenceContent: ...
 
-    def materialize(self, storage_key: str) -> AsyncContextManager[Path]: ...
-
+    async def resolve_recording(self, storage_key: str) -> RecordingSource: ...
 
 def _validate_storage_key(storage_key: str) -> None:
     parts = storage_key.split("/")
@@ -142,9 +153,8 @@ class LocalEvidenceStorage:
         path = await self._content_path(storage_key)
         return EvidenceContent(chunks=self._stream_path(path))
 
-    @asynccontextmanager
-    async def materialize(self, storage_key: str) -> AsyncIterator[Path]:
-        yield await self._content_path(storage_key)
+    async def resolve_recording(self, storage_key: str) -> RecordingSource:
+        return RecordingSource(local_path=await self._content_path(storage_key))
 
     async def _content_path(self, storage_key: str) -> Path:
         path = await anyio.to_thread.run_sync(self._resolve_key, storage_key)
@@ -241,36 +251,10 @@ class GCSEvidenceStorage:
         blob = await self._get_blob(storage_key)
         return EvidenceContent(chunks=self._stream_blob(blob))
 
-    @asynccontextmanager
-    async def materialize(self, storage_key: str) -> AsyncIterator[Path]:
+    async def resolve_recording(self, storage_key: str) -> RecordingSource:
         _validate_storage_key(storage_key)
-        blob = await self._get_blob(storage_key)
-        suffix = Path(storage_key).suffix.lower()
-        if suffix not in _EXTENSIONS.values():
-            suffix = ""
-        try:
-            temporary_directory = await anyio.to_thread.run_sync(TemporaryDirectory)
-        except OSError as exc:
-            raise EvidenceStorageError("Unable to read evidence.") from exc
-        path = Path(temporary_directory.name) / f"evidence{suffix}"
-        try:
-            try:
-                await anyio.to_thread.run_sync(
-                    lambda: blob.download_to_filename(str(path))
-                )
-            except NotFound as exc:
-                raise EvidenceStorageError(
-                    "Evidence content is unavailable."
-                ) from exc
-            except (GoogleAPIError, OSError) as exc:
-                raise EvidenceStorageError("Unable to read evidence.") from exc
-            yield path
-        finally:
-            with anyio.CancelScope(shield=True):
-                try:
-                    await anyio.to_thread.run_sync(temporary_directory.cleanup)
-                except OSError as exc:
-                    raise EvidenceStorageError("Unable to read evidence.") from exc
+        await self._get_blob(storage_key)
+        return RecordingSource(file_uri=f"gs://{self.bucket.name}/{storage_key}")
 
     async def _get_blob(self, storage_key: str) -> storage.Blob:
         try:

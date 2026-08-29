@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .evidence_storage import EvidenceStorage, EvidenceStorageError
+from .evidence_storage import EvidenceStorage, EvidenceStorageError, RecordingSource
 from .repository import PersistedEvidence, PersistedInvestigation
 
 AnalysisText = Annotated[str, Field(max_length=10_000)]
@@ -56,7 +54,7 @@ class BugAnalysis(BaseModel):
 
 @dataclass(frozen=True)
 class RecordingEvidence:
-    path: Path
+    source: RecordingSource
     mime_type: str
 
 
@@ -106,31 +104,28 @@ class InvestigationAnalyzerService:
         logs: list[str] = []
         recordings: list[RecordingEvidence] = []
         try:
-            async with AsyncExitStack() as stack:
-                for item in evidence:
-                    if item.kind == "logs" and item.text_content is not None:
-                        logs.append(item.text_content)
-                    elif item.kind == "recording":
-                        if item.storage_key is None:
-                            raise AnalyzerEvidenceError(
-                                "Recording metadata has no storage key."
-                            )
-                        path = await stack.enter_async_context(
-                            self.storage.materialize(item.storage_key)
+            for item in evidence:
+                if item.kind == "logs" and item.text_content is not None:
+                    logs.append(item.text_content)
+                elif item.kind == "recording":
+                    if item.storage_key is None:
+                        raise AnalyzerEvidenceError(
+                            "Recording metadata has no storage key."
                         )
-                        mime_type = (item.mime_type or "video/webm").split(";", 1)[0]
-                        recordings.append(
-                            RecordingEvidence(path=path, mime_type=mime_type)
-                        )
-
-                return await self.analyzer.analyze(
-                    AnalysisInput(
-                        title=investigation.title,
-                        description=investigation.description,
-                        logs=logs,
-                        recordings=recordings,
+                    source = await self.storage.resolve_recording(item.storage_key)
+                    mime_type = (item.mime_type or "video/webm").split(";", 1)[0]
+                    recordings.append(
+                        RecordingEvidence(source=source, mime_type=mime_type)
                     )
+
+            return await self.analyzer.analyze(
+                AnalysisInput(
+                    title=investigation.title,
+                    description=investigation.description,
+                    logs=logs,
+                    recordings=recordings,
                 )
+            )
         except EvidenceStorageError as exc:
             raise AnalyzerEvidenceError(
                 "Recording evidence is unavailable."
