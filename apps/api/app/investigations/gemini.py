@@ -42,18 +42,24 @@ class GeminiBugAnalyzer:
     def __init__(
         self,
         *,
-        api_key: str,
+        project: str,
+        location: str,
         model_name: str,
         processing_timeout_seconds: float,
         poll_interval_seconds: float = 2.0,
-        client_factory: Callable[[str], Any] | None = None,
+        client_factory: Callable[[str, str], Any] | None = None,
     ):
-        self.api_key = api_key
+        self.project = project
+        self.location = location
         self._model_name = model_name
         self.processing_timeout_seconds = processing_timeout_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.client_factory = client_factory or (
-            lambda key: genai.Client(api_key=key)
+            lambda project, location: genai.Client(
+                vertexai=True,
+                project=project,
+                location=location,
+            )
         )
 
     @property
@@ -61,31 +67,31 @@ class GeminiBugAnalyzer:
         return self._model_name
 
     async def analyze(self, analysis_input: AnalysisInput) -> BugAnalysis:
-        if not self.api_key.strip() or not self.model_name.strip():
-            raise AnalyzerConfigurationError("Gemini is not configured.")
+        if (
+            not self.project.strip()
+            or not self.location.strip()
+            or not self.model_name.strip()
+        ):
+            raise AnalyzerConfigurationError("Vertex AI is not configured.")
 
         client: Any | None = None
         async_client: Any | None = None
-        uploaded_names: list[str] = []
-        uploaded_files: list[Any] = []
+        recording_parts: list[types.Part] = []
         try:
-            client = self.client_factory(self.api_key)
+            client = self.client_factory(self.project, self.location)
             async_client = client.aio
             for recording in analysis_input.recordings:
-                uploaded = await async_client.files.upload(
-                    file=recording.path,
-                    config=types.UploadFileConfig(mime_type=recording.mime_type),
-                )
-                if not uploaded.name:
-                    raise AnalyzerProviderError("Gemini did not identify the upload.")
-                uploaded_names.append(uploaded.name)
-                uploaded_files.append(
-                    await self._wait_until_active(async_client, uploaded)
+                data = await asyncio.to_thread(recording.path.read_bytes)
+                recording_parts.append(
+                    types.Part.from_bytes(
+                        data=data,
+                        mime_type=recording.mime_type,
+                    )
                 )
 
             response = await async_client.models.generate_content(
                 model=self.model_name,
-                contents=[*uploaded_files, _build_prompt(analysis_input)],
+                contents=[*recording_parts, _build_prompt(analysis_input)],
                 config=types.GenerateContentConfig(
                     system_instruction=_SYSTEM_INSTRUCTION,
                     response_mime_type="application/json",
@@ -105,11 +111,6 @@ class GeminiBugAnalyzer:
             raise AnalyzerProviderError("Gemini analysis failed.") from exc
         finally:
             if async_client is not None:
-                for name in uploaded_names:
-                    try:
-                        await async_client.files.delete(name=name)
-                    except Exception:
-                        logger.warning("gemini_file_cleanup_failed")
                 try:
                     await async_client.aclose()
                 except Exception:
@@ -119,25 +120,6 @@ class GeminiBugAnalyzer:
                     client.close()
                 except Exception:
                     logger.warning("gemini_client_cleanup_failed")
-
-    async def _wait_until_active(self, async_client: Any, uploaded: Any) -> Any:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.processing_timeout_seconds
-        current = uploaded
-        while _state_name(current) != "ACTIVE":
-            if _state_name(current) == "FAILED":
-                raise AnalyzerProviderError("Gemini could not process the recording.")
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise AnalyzerProviderError("Gemini recording processing timed out.")
-            await asyncio.sleep(min(self.poll_interval_seconds, remaining))
-            current = await async_client.files.get(name=current.name)
-        return current
-
-
-def _state_name(uploaded: Any) -> str:
-    state = getattr(uploaded, "state", None)
-    return getattr(state, "name", str(state or ""))
 
 
 def _build_prompt(analysis_input: AnalysisInput) -> str:

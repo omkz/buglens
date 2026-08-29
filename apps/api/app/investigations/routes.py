@@ -214,7 +214,8 @@ def get_evidence_storage(
 
 def get_bug_analyzer(settings: Settings = Depends(get_settings)) -> BugAnalyzer:
     return GeminiBugAnalyzer(
-        api_key=settings.gemini_api_key,
+        project=settings.google_cloud_project,
+        location=settings.google_cloud_location,
         model_name=settings.gemini_model,
         processing_timeout_seconds=settings.gemini_file_processing_timeout_seconds,
     )
@@ -231,7 +232,8 @@ def get_investigation_agent_service(
     settings: Settings = Depends(get_settings),
 ) -> InvestigationAgentService:
     agent = AdkRepositoryInvestigationAgent(
-        api_key=settings.gemini_api_key,
+        project=settings.google_cloud_project,
+        location=settings.google_cloud_location,
         model_name=settings.gemini_model,
     )
     runner = PlaywrightPlanRunner(

@@ -81,13 +81,13 @@ env \
   GITHUB_CLIENT_ID_SECRET_VERSION=1 \
   GITHUB_CLIENT_SECRET_SECRET=buglens-github-client-secret \
   GITHUB_CLIENT_SECRET_SECRET_VERSION=1 \
-  GEMINI_API_KEY_SECRET=buglens-gemini-api-key \
-  GEMINI_API_KEY_SECRET_VERSION=1 \
   "${script_directory}/deploy-api.sh"
 assert_contains "$gcloud_log" "--image=${api_image}"
 assert_contains "$gcloud_log" "--ingress=internal-and-cloud-load-balancing"
 assert_contains "$gcloud_log" "--no-default-url"
 assert_contains "$gcloud_log" "PLAYWRIGHT_ALLOW_PRIVATE_NETWORK=false"
+assert_contains "$gcloud_log" "GOOGLE_CLOUD_PROJECT=test-project"
+assert_contains "$gcloud_log" "GOOGLE_CLOUD_LOCATION=global"
 
 : >"$gcloud_log"
 env \

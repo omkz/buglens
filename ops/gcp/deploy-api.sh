@@ -54,12 +54,14 @@ required=(
   GITHUB_PRIVATE_KEY_SECRET
   GITHUB_CLIENT_ID_SECRET
   GITHUB_CLIENT_SECRET_SECRET
-  GEMINI_API_KEY_SECRET
 )
 
 for name in "${required[@]}"; do
   require_env "$name"
 done
+
+GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT:-$GCP_PROJECT_ID}"
+GOOGLE_CLOUD_LOCATION="${GOOGLE_CLOUD_LOCATION:-global}"
 
 if [[ ! "$API_IMAGE_URI" =~ :[0-9a-fA-F]{40}$ ]]; then
   printf 'error: API_IMAGE_URI must use a full Git SHA tag.\n' >&2
@@ -72,7 +74,6 @@ secret_versions=(
   GITHUB_PRIVATE_KEY_SECRET_VERSION
   GITHUB_CLIENT_ID_SECRET_VERSION
   GITHUB_CLIENT_SECRET_SECRET_VERSION
-  GEMINI_API_KEY_SECRET_VERSION
 )
 
 for name in "${secret_versions[@]}"; do
@@ -90,12 +91,15 @@ for name in "${env_values[@]}"; do
   require_no_separator "$name"
 done
 
+require_no_separator GOOGLE_CLOUD_PROJECT
+require_no_separator GOOGLE_CLOUD_LOCATION
+
 if [[ "$APP_BASE_URL" != https://* ]]; then
   printf 'error: APP_BASE_URL must start with https://.\n' >&2
   exit 1
 fi
 
-if [[ "$APP_BASE_URL" == */ ]]; then
+if [[ "" == */ ]]; then
   printf 'error: APP_BASE_URL must not have a trailing slash.\n' >&2
   exit 1
 fi
@@ -112,6 +116,8 @@ environment_variables+="|GITHUB_APP_SLUG=${GITHUB_APP_SLUG}"
 environment_variables+="|GITHUB_PRIVATE_KEY_PATH=${github_private_key_path}"
 environment_variables+="|LOG_LEVEL=INFO|LOG_FORMAT=json"
 environment_variables+="|EVIDENCE_STORAGE_BACKEND=gcs|GCS_BUCKET=${GCS_BUCKET}"
+environment_variables+="|GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}"
+environment_variables+="|GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION}"
 environment_variables+="|DATABASE_POOL_SIZE=5|DATABASE_MAX_OVERFLOW=2"
 environment_variables+="|DATABASE_POOL_TIMEOUT_SECONDS=30"
 environment_variables+="|DATABASE_POOL_RECYCLE_SECONDS=1800"
@@ -122,7 +128,6 @@ secret_references="DATABASE_URL=${DATABASE_URL_SECRET}:${DATABASE_URL_SECRET_VER
 secret_references+=",SESSION_SECRET=${SESSION_SECRET_SECRET}:${SESSION_SECRET_SECRET_VERSION}"
 secret_references+=",GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID_SECRET}:${GITHUB_CLIENT_ID_SECRET_VERSION}"
 secret_references+=",GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET_SECRET}:${GITHUB_CLIENT_SECRET_SECRET_VERSION}"
-secret_references+=",GEMINI_API_KEY=${GEMINI_API_KEY_SECRET}:${GEMINI_API_KEY_SECRET_VERSION}"
 secret_references+=",${github_private_key_path}=${GITHUB_PRIVATE_KEY_SECRET}:${GITHUB_PRIVATE_KEY_SECRET_VERSION}"
 
 gcloud run deploy "$CLOUD_RUN_SERVICE" \

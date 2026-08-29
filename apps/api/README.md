@@ -35,12 +35,18 @@ contains:
 - `LOG_FORMAT=json`
 - `EVIDENCE_STORAGE_BACKEND=gcs`
 - `GCS_BUCKET`
+- `GOOGLE_CLOUD_PROJECT`
+- `GOOGLE_CLOUD_LOCATION`
 - `DATABASE_POOL_SIZE=5`
 - `DATABASE_MAX_OVERFLOW=2`
 - `DATABASE_POOL_TIMEOUT_SECONDS=30`
 - `DATABASE_POOL_RECYCLE_SECONDS=1800`
 - `SESSION_COOKIE_SECURE=true`
 - `PLAYWRIGHT_ALLOW_PRIVATE_NETWORK=false`
+
+Gemini uses Vertex AI with Application Default Credentials. In Cloud Run, the
+runtime service account supplies ADC; no service-account JSON key or Gemini API
+key is used.
 
 The GCP deployment scripts supply these values through Secret Manager:
 
@@ -49,7 +55,6 @@ The GCP deployment scripts supply these values through Secret Manager:
 - the GitHub private key file referenced by `GITHUB_PRIVATE_KEY_PATH`
 - `GITHUB_CLIENT_ID`
 - `GITHUB_CLIENT_SECRET`
-- `GEMINI_API_KEY`
 
 Never commit production secrets to `.env` files. Database migrations must run
 as a separate deployment step or job; API instances do not run Alembic during

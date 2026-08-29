@@ -90,6 +90,8 @@ also requires:
 - `APP_BASE_URL=https://app.buglens.ai` without a trailing slash
 - `GITHUB_APP_ID`
 - `GITHUB_APP_SLUG`
+- `GOOGLE_CLOUD_PROJECT` (defaults to `GCP_PROJECT_ID`)
+- `GOOGLE_CLOUD_LOCATION` (defaults to `global`)
 
 The API derives its frontend, backend, and GitHub OAuth callback URLs from
 `APP_BASE_URL`. It keeps the existing Cloud SQL attachment, GCS backend,
@@ -125,7 +127,6 @@ Create and manage these secret IDs outside the scripts:
 - `buglens-github-private-key`
 - `buglens-github-client-id`
 - `buglens-github-client-secret`
-- `buglens-gemini-api-key`
 
 Supply every secret ID and a pinned numeric version separately:
 
@@ -134,7 +135,6 @@ Supply every secret ID and a pinned numeric version separately:
 - `GITHUB_PRIVATE_KEY_SECRET` and `GITHUB_PRIVATE_KEY_SECRET_VERSION`
 - `GITHUB_CLIENT_ID_SECRET` and `GITHUB_CLIENT_ID_SECRET_VERSION`
 - `GITHUB_CLIENT_SECRET_SECRET` and `GITHUB_CLIENT_SECRET_SECRET_VERSION`
-- `GEMINI_API_KEY_SECRET` and `GEMINI_API_KEY_SECRET_VERSION`
 
 Versions such as `1`, `2`, or `3` are required; `latest` is rejected. The GitHub
 private key is mounted at `/var/secrets/buglens/github-private-key.pem`, never
@@ -160,8 +160,9 @@ postgresql+psycopg://USER:PASSWORD@/buglens?host=/cloudsql/PROJECT:REGION:INSTAN
 The scripts do not grant IAM roles.
 
 The API runtime service account needs Cloud SQL Client, Secret Manager Secret
-Accessor on only the six Buglensa secrets, and bucket-level
-`roles/storage.objectUser` on only the evidence bucket.
+Accessor on only the five Buglensa secrets, bucket-level
+`roles/storage.objectUser` on only the evidence bucket, and
+`roles/aiplatform.user` for Vertex AI Gemini access.
 
 The migration service account needs Cloud SQL Client and Secret Manager Secret
 Accessor only for the database URL. It does not need GCS, GitHub, or Gemini
@@ -169,7 +170,7 @@ access.
 
 The separate web runtime service account needs no application resource roles.
 It does not need Cloud SQL Client, Secret Manager access, Storage Object User,
-Gemini access, or GitHub access.
+Vertex AI access, or GitHub access.
 
 The release identity needs permission to submit Cloud Builds, deploy Cloud Run
 services and jobs, reconcile the Compute load-balancer resources, and act as the

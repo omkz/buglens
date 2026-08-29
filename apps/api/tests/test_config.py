@@ -55,6 +55,18 @@ def test_database_pool_and_local_development_defaults(monkeypatch):
     )
 
 
+def test_vertex_ai_environment_configuration(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "orbital-wharf-427808-p5")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    settings = _settings()
+
+    assert settings.google_cloud_project == "orbital-wharf-427808-p5"
+    assert settings.google_cloud_location == "global"
+    assert not hasattr(settings, "gemini_api_key")
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

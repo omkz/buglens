@@ -59,8 +59,11 @@ class InvestigationAgentService:
     ) -> tuple[AgentInvestigationResult, str | None, BrowserExecutionResult | None]:
         if progress_callback is not None:
             await progress_callback("starting", "Starting investigation…")
-        if not self.settings.gemini_api_key:
-            raise AgentConfigurationError("Gemini is not configured.")
+        if (
+            not self.settings.google_cloud_project
+            or not self.settings.google_cloud_location
+        ):
+            raise AgentConfigurationError("Vertex AI is not configured.")
         if progress_callback is not None:
             await progress_callback(
                 "investigating_repository", "Inspecting repository…"

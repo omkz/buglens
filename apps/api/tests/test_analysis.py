@@ -263,7 +263,7 @@ def test_description_only_analysis_is_scoped_and_persists_result(monkeypatch):
             "Bug analysis failed. Please try again.",
         ),
         (
-            AnalyzerConfigurationError("missing GEMINI_API_KEY"),
+            AnalyzerConfigurationError("missing Vertex AI configuration"),
             503,
             "Bug analysis is not configured.",
         ),
@@ -510,27 +510,6 @@ async def test_analysis_service_preserves_analyzer_provider_errors(tmp_path: Pat
     assert exc_info.value is provider_error
 
 
-class FakeGeminiFiles:
-    def __init__(self):
-        self.uploaded = []
-        self.fetched = []
-        self.deleted = []
-
-    async def upload(self, *, file, config):
-        self.uploaded.append((Path(file), config.mime_type))
-        return SimpleNamespace(
-            name=f"files/upload-{len(self.uploaded)}",
-            state=SimpleNamespace(name="PROCESSING"),
-        )
-
-    async def get(self, *, name):
-        self.fetched.append(name)
-        return SimpleNamespace(name=name, state=SimpleNamespace(name="ACTIVE"))
-
-    async def delete(self, *, name):
-        self.deleted.append(name)
-
-
 class FakeGeminiModels:
     def __init__(self, result):
         self.result = result
@@ -545,7 +524,6 @@ class FakeGeminiModels:
 
 class FakeAsyncGeminiClient:
     def __init__(self, result):
-        self.files = FakeGeminiFiles()
         self.models = FakeGeminiModels(result)
         self.closed = False
 
@@ -563,16 +541,53 @@ class FakeGeminiClient:
 
 
 @pytest.mark.anyio
-async def test_gemini_uploads_structured_evidence_and_cleans_remote_file(tmp_path):
+async def test_gemini_uses_vertex_ai_adc_client_configuration(monkeypatch):
+    from app.investigations import gemini as gemini_module
+
+    captured = {}
+    fake_client = FakeGeminiClient(_analysis())
+
+    def create_client(**kwargs):
+        captured.update(kwargs)
+        return fake_client
+
+    monkeypatch.setattr(gemini_module.genai, "Client", create_client)
+    analyzer = GeminiBugAnalyzer(
+        project="orbital-wharf-427808-p5",
+        location="global",
+        model_name="gemini-test-model",
+        processing_timeout_seconds=1,
+    )
+
+    result = await analyzer.analyze(
+        AnalysisInput(
+            title="Checkout bug",
+            description="The checkout button does nothing.",
+            logs=[],
+            recordings=[],
+        )
+    )
+
+    assert result == _analysis()
+    assert captured == {
+        "vertexai": True,
+        "project": "orbital-wharf-427808-p5",
+        "location": "global",
+    }
+
+
+@pytest.mark.anyio
+async def test_gemini_sends_structured_multimodal_evidence(tmp_path):
     recording = tmp_path / "recording.webm"
     recording.write_bytes(b"video")
     fake_client = FakeGeminiClient(_analysis())
     analyzer = GeminiBugAnalyzer(
-        api_key="test-only-key",
+        project="orbital-wharf-427808-p5",
+        location="global",
         model_name="gemini-test-model",
         processing_timeout_seconds=1,
         poll_interval_seconds=0,
-        client_factory=lambda _key: fake_client,
+        client_factory=lambda _project, _location: fake_client,
     )
 
     result = await analyzer.analyze(
@@ -585,28 +600,28 @@ async def test_gemini_uploads_structured_evidence_and_cleans_remote_file(tmp_pat
     )
 
     assert result == _analysis()
-    assert fake_client.aio.files.uploaded == [(recording, "video/webm")]
-    assert fake_client.aio.files.fetched == ["files/upload-1"]
-    assert fake_client.aio.files.deleted == ["files/upload-1"]
     request = fake_client.aio.models.calls[0]
     assert request["model"] == "gemini-test-model"
     assert request["config"].response_schema is BugAnalysis
+    assert request["contents"][0].inline_data.data == b"video"
+    assert request["contents"][0].inline_data.mime_type == "video/webm"
     assert "UNTRUSTED DATA" in request["contents"][-1]
     assert fake_client.aio.closed is True
     assert fake_client.closed is True
 
 
 @pytest.mark.anyio
-async def test_gemini_cleanup_is_attempted_after_provider_failure(tmp_path):
+async def test_gemini_clients_are_closed_after_provider_failure(tmp_path):
     recording = tmp_path / "recording.webm"
     recording.write_bytes(b"video")
     fake_client = FakeGeminiClient(RuntimeError("raw Gemini response"))
     analyzer = GeminiBugAnalyzer(
-        api_key="test-only-key",
+        project="orbital-wharf-427808-p5",
+        location="global",
         model_name="gemini-test-model",
         processing_timeout_seconds=1,
         poll_interval_seconds=0,
-        client_factory=lambda _key: fake_client,
+        client_factory=lambda _project, _location: fake_client,
     )
 
     with pytest.raises(AnalyzerProviderError):
@@ -619,17 +634,19 @@ async def test_gemini_cleanup_is_attempted_after_provider_failure(tmp_path):
             )
         )
 
-    assert fake_client.aio.files.deleted == ["files/upload-1"]
+    assert fake_client.aio.closed is True
+    assert fake_client.closed is True
 
 
 @pytest.mark.anyio
-async def test_missing_gemini_configuration_makes_no_client_or_network_call():
+async def test_missing_vertex_configuration_makes_no_client_or_network_call():
     calls = []
     analyzer = GeminiBugAnalyzer(
-        api_key="",
+        project="",
+        location="global",
         model_name="gemini-test-model",
         processing_timeout_seconds=1,
-        client_factory=lambda key: calls.append(key),
+        client_factory=lambda project, location: calls.append((project, location)),
     )
 
     with pytest.raises(AnalyzerConfigurationError):

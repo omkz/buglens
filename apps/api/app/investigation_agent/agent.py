@@ -67,8 +67,9 @@ class RepositoryInvestigationAgent(Protocol):
 class AdkRepositoryInvestigationAgent:
     """Runs one ephemeral ADK Agent session and validates its structured result."""
 
-    def __init__(self, *, api_key: str, model_name: str):
-        self.api_key = api_key
+    def __init__(self, *, project: str, location: str, model_name: str):
+        self.project = project
+        self.location = location
         self._model_name = model_name
 
     @property
@@ -83,15 +84,19 @@ class AdkRepositoryInvestigationAgent:
         application_url_configured: bool,
         tools: list[Callable[..., Any]],
     ) -> AgentInvestigationResult:
-        if not self.api_key:
-            raise AgentConfigurationError("Gemini is not configured.")
+        if not self.project or not self.location or not self._model_name:
+            raise AgentConfigurationError("Vertex AI is not configured.")
 
         agent = Agent(
             name="buglens_investigation_agent",
             description="Read-only repository investigation for an analyzed bug.",
             model=Gemini(
                 model=self._model_name,
-                client_kwargs={"api_key": self.api_key},
+                client_kwargs={
+                    "vertexai": True,
+                    "project": self.project,
+                    "location": self.location,
+                },
             ),
             instruction=_INSTRUCTION,
             tools=tools,

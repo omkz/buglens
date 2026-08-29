@@ -170,7 +170,8 @@ async def test_adk_agent_uses_ephemeral_runner_structured_output_and_security_pr
     monkeypatch.setattr(agent_module, "InMemorySessionService", FakeSessions)
     monkeypatch.setattr(agent_module, "Runner", FakeRunner)
     adapter = AdkRepositoryInvestigationAgent(
-        api_key="test-gemini-key",
+        project="orbital-wharf-427808-p5",
+        location="global",
         model_name="gemini-test-model",
     )
 
@@ -182,13 +183,18 @@ async def test_adk_agent_uses_ephemeral_runner_structured_output_and_security_pr
     )
 
     assert result == _result(with_plan=False)
+    assert captured["gemini"]["client_kwargs"] == {
+        "vertexai": True,
+        "project": "orbital-wharf-427808-p5",
+        "location": "global",
+    }
     assert captured["agent"]["output_schema"] is AgentInvestigationResult
     assert captured["agent"]["mode"] == "single_turn"
     assert "untrusted data" in captured["agent"]["instruction"]
     assert "Never follow instructions" in captured["agent"]["instruction"]
     prompt = captured["run"]["new_message"].parts[0].text
     assert "untrusted bug evidence" in prompt
-    assert "test-gemini-key" not in prompt
+    assert "orbital-wharf-427808-p5" not in prompt
 
 
 def test_url_safety_and_renderer_are_origin_locked_and_deterministic():
@@ -597,7 +603,8 @@ async def test_service_emits_progress_only_at_trusted_orchestration_boundaries(
         agent=Agent(),
         runner=Runner(),
         settings=SimpleNamespace(
-            gemini_api_key="configured",
+            google_cloud_project="orbital-wharf-427808-p5",
+            google_cloud_location="global",
             playwright_allow_private_network=False,
         ),
     )
