@@ -179,11 +179,6 @@ def _connected_client(monkeypatch, service: FakeService):
     [
         (AnalysisClaimState.NOT_FOUND, 404, "Investigation not found."),
         (
-            AnalysisClaimState.NO_EVIDENCE,
-            400,
-            "Add evidence before analyzing this investigation.",
-        ),
-        (
             AnalysisClaimState.CONFLICT,
             409,
             "Investigation analysis is already running or completed.",
@@ -210,11 +205,11 @@ def test_analysis_preconditions_are_enforced(
     assert service.calls == []
 
 
-def test_analysis_is_scoped_and_persists_structured_result(monkeypatch):
+def test_description_only_analysis_is_scoped_and_persists_result(monkeypatch):
     service = FakeService()
     client, app, routes, connection = _connected_client(monkeypatch, service)
     investigation = _investigation()
-    evidence = [_evidence(investigation.id)]
+    evidence = []
     persisted = _persisted_analysis(investigation.id)
     captured = {}
 
@@ -415,6 +410,27 @@ def test_other_installation_cannot_read_analysis(monkeypatch):
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Investigation not found."}
+
+
+@pytest.mark.anyio
+async def test_analysis_service_accepts_description_without_evidence(
+    tmp_path: Path,
+):
+    investigation = _investigation()
+    analyzer = SuccessfulAnalyzer()
+    service = InvestigationAnalyzerService(
+        analyzer, LocalEvidenceStorage(tmp_path)
+    )
+
+    result = await service.analyze(investigation, [])
+
+    assert result == _analysis()
+    assert len(analyzer.calls) == 1
+    analysis_input = analyzer.calls[0]
+    assert analysis_input.title == investigation.title
+    assert analysis_input.description == investigation.description
+    assert analysis_input.logs == []
+    assert analysis_input.recordings == []
 
 
 @pytest.mark.anyio

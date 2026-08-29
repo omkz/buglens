@@ -424,6 +424,18 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 await db.commit()
 
                 assert first_investigation.status == "pending"
+
+                description_only_claim = await claim_analysis(
+                    db,
+                    installation_id=second_connection.installation_id,
+                    investigation_id=second_investigation.id,
+                )
+                assert description_only_claim.state == AnalysisClaimState.READY
+                assert description_only_claim.investigation is not None
+                assert description_only_claim.investigation.status == "running"
+                assert description_only_claim.evidence == []
+                await db.rollback()
+
                 first_evidence_id = uuid.uuid4()
                 first_evidence = await create_evidence_items(
                     db,

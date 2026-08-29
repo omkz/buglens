@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { API_BASE_URL } from "@/lib/config";
 import { EvidenceRecorder } from "../_components/evidence-recorder";
+import { shouldShowAnalyzeBug } from "@/lib/analysis-availability.mjs";
 import type {
   AgentRunResult,
   AgentRunProgress,
@@ -557,8 +558,9 @@ export default function InvestigationDetailPage() {
             </div>
 
             {state.evidence.length === 0 && (
-              <p className="text-sm text-zinc-500">
-                No evidence has been saved yet.
+              <p className="max-w-2xl text-sm leading-6 text-zinc-500">
+                No evidence attached. Buglensa will analyze the report
+                description. Add a recording or logs for richer context.
               </p>
             )}
 
@@ -619,32 +621,26 @@ export default function InvestigationDetailPage() {
                 Bug analysis
               </h2>
               <p className="text-sm text-zinc-500">
-                Understand the supplied evidence without inspecting source code.
+                Understand the report and any supplied evidence before inspecting
+                source code.
               </p>
             </div>
 
-            {state.investigation.status === "pending" &&
-              state.evidence.length > 0 &&
-              !isAnalyzing && (
-                <button
-                  type="button"
-                  disabled={isAnalyzing}
-                  onClick={analyzeBug}
-                  className="self-start rounded-full bg-zinc-50 px-4 py-2 text-sm font-medium text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  Analyze Bug
-                </button>
-              )}
-
-            {state.investigation.status === "pending" &&
-              state.evidence.length === 0 && (
-                <p className="text-sm text-zinc-500">
-                  Add evidence before analyzing this investigation.
-                </p>
-              )}
+            {shouldShowAnalyzeBug(state.investigation.status, isAnalyzing) && (
+              <button
+                type="button"
+                disabled={isAnalyzing}
+                onClick={analyzeBug}
+                className="self-start rounded-full bg-zinc-50 px-4 py-2 text-sm font-medium text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Analyze Bug
+              </button>
+            )}
 
             {(state.investigation.status === "running" || isAnalyzing) && (
-              <p className="text-sm text-zinc-300">Analyzing evidence…</p>
+              <p className="text-sm text-zinc-300">
+                Analyzing report and any evidence…
+              </p>
             )}
 
             {state.investigation.status === "failed" && !isAnalyzing && (

@@ -74,7 +74,6 @@ class PersistedAnalysis:
 class AnalysisClaimState(StrEnum):
     READY = "ready"
     NOT_FOUND = "not_found"
-    NO_EVIDENCE = "no_evidence"
     CONFLICT = "conflict"
 
 
@@ -277,8 +276,6 @@ async def claim_analysis(
         )
     )
     evidence = [_to_persisted_evidence(item) for item in result.scalars()]
-    if not evidence:
-        return AnalysisClaim(state=AnalysisClaimState.NO_EVIDENCE)
 
     investigation.status = models.InvestigationStatus.RUNNING.value
     await db.flush()

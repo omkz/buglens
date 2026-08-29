@@ -587,12 +587,6 @@ async def analyze_investigation(
         if claim.state == AnalysisClaimState.NOT_FOUND:
             await db.rollback()
             raise HTTPException(status_code=404, detail="Investigation not found.")
-        if claim.state == AnalysisClaimState.NO_EVIDENCE:
-            await db.rollback()
-            raise HTTPException(
-                status_code=400,
-                detail="Add evidence before analyzing this investigation.",
-            )
         if claim.state == AnalysisClaimState.CONFLICT:
             await db.rollback()
             raise HTTPException(
