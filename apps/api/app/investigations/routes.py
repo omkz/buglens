@@ -807,14 +807,30 @@ async def run_agent_investigation(
             status_code=502,
             detail="Repository investigation failed. Please try again.",
         ) from None
-    except (AgentProviderError, InvestigationResultError) as exc:
+    except AgentProviderError as exc:
         await _best_effort_mark_agent_run_failed(
             db, investigation_id, payload.attempt_id
         )
         logger.warning(
             "agent_run_provider_failed",
             investigation_id=str(investigation_id),
+            failure_kind=exc.kind,
             exception_type=type(exc).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Autonomous investigation failed. Please try again.",
+        ) from None
+    except InvestigationResultError as exc:
+        await _best_effort_mark_agent_run_failed(
+            db, investigation_id, payload.attempt_id
+        )
+        logger.warning(
+            "agent_run_result_invalid",
+            investigation_id=str(investigation_id),
+            exception_type=type(exc).__name__,
+            exc_info=True,
         )
         raise HTTPException(
             status_code=502,

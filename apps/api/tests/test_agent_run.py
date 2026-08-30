@@ -42,6 +42,7 @@ from app.investigation_agent.schemas import (
 from app.investigation_agent.service import (
     InvestigationAgentService,
     InvestigationGitHubError,
+    InvestigationResultError,
     _validate_agent_result,
 )
 from app.investigation_agent.tools.github import GitHubToolContext
@@ -99,6 +100,43 @@ def _context() -> AgentRunContext:
         default_branch="main",
         app_url="https://demo.example.com",
         analysis=_analysis(),
+    )
+
+
+def _patch_adk_runner(monkeypatch, event_stream):
+    from app.investigation_agent import agent as agent_module
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeGemini:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeSessions:
+        async def create_session(self, **kwargs):
+            pass
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run_async(self, **kwargs):
+            async for event in event_stream():
+                yield event
+
+    monkeypatch.setattr(agent_module, "Agent", FakeAgent)
+    monkeypatch.setattr(agent_module, "Gemini", FakeGemini)
+    monkeypatch.setattr(agent_module, "InMemorySessionService", FakeSessions)
+    monkeypatch.setattr(agent_module, "Runner", FakeRunner)
+
+
+def _adk_adapter() -> AdkRepositoryInvestigationAgent:
+    return AdkRepositoryInvestigationAgent(
+        project="orbital-wharf-427808-p5",
+        location="global",
+        model_name="gemini-test-model",
     )
 
 
@@ -195,6 +233,81 @@ async def test_adk_agent_uses_ephemeral_runner_structured_output_and_security_pr
     prompt = captured["run"]["new_message"].parts[0].text
     assert "untrusted bug evidence" in prompt
     assert "orbital-wharf-427808-p5" not in prompt
+
+
+@pytest.mark.anyio
+async def test_adk_runtime_error_is_safely_classified_and_chained(monkeypatch):
+    runtime_error = RuntimeError("provider diagnostic payload")
+
+    async def events():
+        raise runtime_error
+        yield
+
+    _patch_adk_runner(monkeypatch, events)
+
+    with pytest.raises(AgentProviderError) as exc_info:
+        await _adk_adapter().investigate(
+            investigation_id=uuid.uuid4(),
+            analysis=_analysis(),
+            application_url_configured=False,
+            tools=[],
+        )
+
+    assert exc_info.value.kind == "adk_runtime_error"
+    assert exc_info.value.__cause__ is runtime_error
+    assert str(exc_info.value) == "Autonomous investigation provider failed."
+    assert "provider diagnostic payload" not in str(exc_info.value)
+
+
+@pytest.mark.anyio
+async def test_adk_without_final_response_is_safely_classified(monkeypatch):
+    async def events():
+        if False:
+            yield
+
+    _patch_adk_runner(monkeypatch, events)
+
+    with pytest.raises(AgentProviderError) as exc_info:
+        await _adk_adapter().investigate(
+            investigation_id=uuid.uuid4(),
+            analysis=_analysis(),
+            application_url_configured=False,
+            tools=[],
+        )
+
+    assert exc_info.value.kind == "no_structured_result"
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "final_text",
+    ["{", '{"repository_findings":"invalid"}'],
+)
+async def test_adk_invalid_json_or_schema_is_safely_classified(
+    monkeypatch, final_text
+):
+    class FakeEvent:
+        content = SimpleNamespace(parts=[SimpleNamespace(text=final_text)])
+
+        def is_final_response(self):
+            return True
+
+    async def events():
+        yield FakeEvent()
+
+    _patch_adk_runner(monkeypatch, events)
+
+    with pytest.raises(AgentProviderError) as exc_info:
+        await _adk_adapter().investigate(
+            investigation_id=uuid.uuid4(),
+            analysis=_analysis(),
+            application_url_configured=False,
+            tools=[],
+        )
+
+    assert exc_info.value.kind == "invalid_structured_result"
+    assert isinstance(exc_info.value.__cause__, (ValidationError, ValueError))
 
 
 def test_url_safety_and_renderer_are_origin_locked_and_deterministic():
@@ -926,11 +1039,16 @@ def test_agent_run_request_rejects_browser_selected_metadata(monkeypatch):
 
 
 def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatch):
-    service = _FakeAgentService(AgentProviderError("raw model response with secret"))
+    service = _FakeAgentService(AgentProviderError(kind="adk_runtime_error"))
     client, app, routes, _connection = _connected_client(monkeypatch, service)
     context = _context()
     attempt_id = uuid.uuid4()
     failed = []
+    warnings = []
+
+    class CapturingLogger:
+        def warning(self, event, **kwargs):
+            warnings.append((event, kwargs))
 
     async def claim(*args, **kwargs):
         return AgentRunClaim(state=AgentRunClaimState.READY, context=context)
@@ -940,6 +1058,7 @@ def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatc
 
     monkeypatch.setattr(routes, "claim_agent_run", claim)
     monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
+    monkeypatch.setattr(routes, "logger", CapturingLogger())
     try:
         response = client.post(
             f"/api/investigations/{context.investigation_id}/agent-run",
@@ -951,8 +1070,65 @@ def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatc
     assert response.json() == {
         "detail": "Autonomous investigation failed. Please try again."
     }
-    assert "raw model" not in response.text
     assert failed == [(context.investigation_id, attempt_id)]
+    assert warnings == [
+        (
+            "agent_run_provider_failed",
+            {
+                "investigation_id": str(context.investigation_id),
+                "failure_kind": "adk_runtime_error",
+                "exception_type": "AgentProviderError",
+                "exc_info": True,
+            },
+        )
+    ]
+
+
+def test_agent_result_failure_uses_separate_safe_logging_path(monkeypatch):
+    service = _FakeAgentService(InvestigationResultError("validation reason"))
+    client, app, routes, _connection = _connected_client(monkeypatch, service)
+    context = _context()
+    attempt_id = uuid.uuid4()
+    failed = []
+    warnings = []
+
+    class CapturingLogger:
+        def warning(self, event, **kwargs):
+            warnings.append((event, kwargs))
+
+    async def claim(*args, **kwargs):
+        return AgentRunClaim(state=AgentRunClaimState.READY, context=context)
+
+    async def mark(*args, **kwargs):
+        failed.append((kwargs["investigation_id"], kwargs["attempt_id"]))
+
+    monkeypatch.setattr(routes, "claim_agent_run", claim)
+    monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
+    monkeypatch.setattr(routes, "logger", CapturingLogger())
+    try:
+        response = client.post(
+            f"/api/investigations/{context.investigation_id}/agent-run",
+            json={"attempt_id": str(attempt_id)},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Autonomous investigation failed. Please try again."
+    }
+    assert "validation reason" not in response.text
+    assert failed == [(context.investigation_id, attempt_id)]
+    assert warnings == [
+        (
+            "agent_run_result_invalid",
+            {
+                "investigation_id": str(context.investigation_id),
+                "exception_type": "InvestigationResultError",
+                "exc_info": True,
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(

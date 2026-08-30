@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import traceback
 from collections.abc import Mapping
 
 import structlog
@@ -130,6 +131,79 @@ def redact_sensitive_fields(
     return event_dict
 
 
+def format_safe_exception_info(
+    logger: object, method_name: str, event_dict: dict[str, object]
+) -> dict[str, object]:
+    """Render traceback chains without serializing exception messages.
+
+    Provider exceptions may embed response bodies or request data in their
+    messages. Stack frames and exception types retain the diagnostic control
+    flow while keeping those arbitrary values out of production logs.
+    """
+    raw_exc_info = event_dict.pop("exc_info", None)
+    if not raw_exc_info:
+        return event_dict
+    if raw_exc_info is True:
+        exc_info = sys.exc_info()
+    elif isinstance(raw_exc_info, BaseException):
+        exc_info = (
+            type(raw_exc_info),
+            raw_exc_info,
+            raw_exc_info.__traceback__,
+        )
+    elif isinstance(raw_exc_info, tuple) and len(raw_exc_info) == 3:
+        exc_info = raw_exc_info
+    else:
+        return event_dict
+
+    exception = exc_info[1]
+    if not isinstance(exception, BaseException):
+        return event_dict
+    event_dict["exception"] = _format_safe_exception_chain(exception)
+    return event_dict
+
+
+def _format_safe_exception_chain(exception: BaseException) -> str:
+    lines: list[str] = []
+    seen: set[int] = set()
+
+    def append(current: BaseException) -> None:
+        if id(current) in seen:
+            return
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            append(current.__cause__)
+            lines.extend(
+                [
+                    "\nThe above exception was the direct cause of the following "
+                    "exception:\n\n"
+                ]
+            )
+        elif current.__context__ is not None and not current.__suppress_context__:
+            append(current.__context__)
+            lines.extend(
+                [
+                    "\nDuring handling of the above exception, another exception "
+                    "occurred:\n\n"
+                ]
+            )
+        if current.__traceback__ is not None:
+            lines.append("Traceback (most recent call last):\n")
+            for frame in traceback.extract_tb(current.__traceback__):
+                lines.append(
+                    f'  File "{frame.filename}", line {frame.lineno}, '
+                    f"in {frame.name}\n"
+                )
+        exception_type = type(current)
+        qualified_name = exception_type.__qualname__
+        if exception_type.__module__ not in {"builtins", "__main__"}:
+            qualified_name = f"{exception_type.__module__}.{qualified_name}"
+        lines.append(f"{qualified_name}\n")
+
+    append(exception)
+    return "".join(lines).rstrip()
+
+
 def configure_logging(*, level: str = "INFO", log_format: str = "console") -> None:
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
@@ -162,7 +236,7 @@ def configure_logging(*, level: str = "INFO", log_format: str = "console") -> No
         foreign_pre_chain=shared_processors,
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.processors.format_exc_info,
+            format_safe_exception_info,
             # Runs for every record, native or foreign, right before
             # rendering -- the single place structured fields are final.
             redact_sensitive_fields,

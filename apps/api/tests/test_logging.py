@@ -3,6 +3,7 @@ import logging
 
 import structlog
 
+from app.investigation_agent.agent import AgentProviderError
 from app.logging import configure_logging
 
 
@@ -188,3 +189,34 @@ def test_session_secret_is_treated_as_sensitive(capsys):
     assert payload["session_secret"] == "[REDACTED]"
     # Unrelated, non-sensitive fields are untouched.
     assert payload["session_cookie_secure"] is False
+
+
+def test_provider_failure_log_keeps_safe_metadata_and_sanitizes_exception_chain(
+    capsys,
+):
+    configure_logging(level="INFO", log_format="json")
+    logger = structlog.get_logger("tests.agent_provider")
+
+    try:
+        try:
+            raise RuntimeError("provider diagnostic payload")
+        except RuntimeError as exc:
+            raise AgentProviderError(kind="adk_runtime_error") from exc
+    except AgentProviderError:
+        logger.warning(
+            "agent_run_provider_failed",
+            investigation_id="inv_456",
+            failure_kind="adk_runtime_error",
+            exception_type="AgentProviderError",
+            exc_info=True,
+        )
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["event"] == "agent_run_provider_failed"
+    assert payload["investigation_id"] == "inv_456"
+    assert payload["failure_kind"] == "adk_runtime_error"
+    assert payload["exception_type"] == "AgentProviderError"
+    assert "RuntimeError" in payload["exception"]
+    assert "AgentProviderError" in payload["exception"]
+    assert "direct cause" in payload["exception"]
+    assert "provider diagnostic payload" not in payload["exception"]

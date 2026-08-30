@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from google.adk.agents import Agent
 from google.adk.models import Gemini
@@ -46,8 +46,19 @@ class AgentConfigurationError(RuntimeError):
     """Raised when the autonomous investigator is not configured."""
 
 
+AgentProviderFailureKind = Literal[
+    "no_structured_result",
+    "invalid_structured_result",
+    "adk_runtime_error",
+]
+
+
 class AgentProviderError(RuntimeError):
     """Raised when ADK/provider output is unavailable or invalid."""
+
+    def __init__(self, *, kind: AgentProviderFailureKind):
+        self.kind = kind
+        super().__init__("Autonomous investigation provider failed.")
 
 
 class RepositoryInvestigationAgent(Protocol):
@@ -87,26 +98,26 @@ class AdkRepositoryInvestigationAgent:
         if not self.project or not self.location or not self._model_name:
             raise AgentConfigurationError("Vertex AI is not configured.")
 
-        agent = Agent(
-            name="buglens_investigation_agent",
-            description="Read-only repository investigation for an analyzed bug.",
-            model=Gemini(
-                model=self._model_name,
-                client_kwargs={
-                    "vertexai": True,
-                    "project": self.project,
-                    "location": self.location,
-                },
-            ),
-            instruction=_INSTRUCTION,
-            tools=tools,
-            output_schema=AgentInvestigationResult,
-            mode="single_turn",
-        )
-        session_service = InMemorySessionService()
-        session_id = str(investigation_id)
-        user_id = "buglens-agent"
         try:
+            agent = Agent(
+                name="buglens_investigation_agent",
+                description="Read-only repository investigation for an analyzed bug.",
+                model=Gemini(
+                    model=self._model_name,
+                    client_kwargs={
+                        "vertexai": True,
+                        "project": self.project,
+                        "location": self.location,
+                    },
+                ),
+                instruction=_INSTRUCTION,
+                tools=tools,
+                output_schema=AgentInvestigationResult,
+                mode="single_turn",
+            )
+            session_service = InMemorySessionService()
+            session_id = str(investigation_id)
+            user_id = "buglens-agent"
             await session_service.create_session(
                 app_name=_APP_NAME,
                 user_id=user_id,
@@ -140,14 +151,17 @@ class AdkRepositoryInvestigationAgent:
                     part.text or "" for part in (event.content.parts or [])
                 ).strip()
             if not final_text:
-                raise AgentProviderError("ADK returned no structured result.")
-            return AgentInvestigationResult.model_validate_json(final_text)
+                raise AgentProviderError(kind="no_structured_result")
+            try:
+                return AgentInvestigationResult.model_validate_json(final_text)
+            except (ValidationError, ValueError, TypeError) as exc:
+                raise AgentProviderError(
+                    kind="invalid_structured_result"
+                ) from exc
         except AgentProviderError:
             raise
-        except (ValidationError, ValueError, TypeError) as exc:
-            raise AgentProviderError("ADK returned an invalid structured result.") from exc
         except Exception as exc:
-            raise AgentProviderError("ADK investigation failed.") from exc
+            raise AgentProviderError(kind="adk_runtime_error") from exc
 
 
 def _build_task_prompt(
