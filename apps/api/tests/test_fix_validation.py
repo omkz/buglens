@@ -368,6 +368,131 @@ async def test_validated_requires_browser_failure_to_be_resolved(
 
 
 @pytest.mark.anyio
+async def test_application_startup_timeout_is_blocked_overall(monkeypatch, tmp_path):
+    from app.investigation_agent import fix_validation as module
+
+    async def token(**kwargs):
+        return "token"
+
+    async def materialize(value, context, checkout):
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "checkout.ts").write_text("old\n")
+        next_bin = checkout / "node_modules" / ".bin" / "next"
+        next_bin.parent.mkdir(parents=True)
+        next_bin.write_text("placeholder")
+
+    class Process:
+        pid = 2_000_000_000
+        returncode = None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    async def create_process(*command, **kwargs):
+        return Process()
+
+    async def not_ready(url):
+        return False
+
+    monkeypatch.setattr(module, "create_scoped_installation_token", token)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(module, "_wait_for_app", not_ready)
+    service = FixValidationService(
+        settings=_settings(enabled=True, repositories="octo-org/checkout"),
+        browser_runner=BrowserRunner(),
+        workspace_parent=tmp_path,
+        materializer=materialize,
+        port_selector=lambda: 46321,
+    )
+    plan = BrowserTestPlan.model_validate(
+        {"name": "Checkout", "actions": [{"type": "goto", "path": "/checkout"}]}
+    )
+
+    result = await service.validate(_context(reproduction_plan=plan))
+
+    assert result.status == "blocked"
+    assert result.reproduction_after == "blocked"
+    assert result.checks[-1].name == "Start isolated application"
+    assert result.checks[-1].status == "blocked"
+    assert "checks passed" not in result.summary.lower()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("browser_status", "check_status", "overall_status"),
+    [
+        ("blocked", "blocked", "blocked"),
+        ("reproduced", "failed", "validation_failed"),
+        ("not_reproduced", "passed", "validated"),
+    ],
+)
+async def test_playwright_result_maps_to_check_and_overall_status(
+    monkeypatch, tmp_path, browser_status, check_status, overall_status
+):
+    from app.investigation_agent import fix_validation as module
+
+    async def token(**kwargs):
+        return "token"
+
+    async def materialize(value, context, checkout):
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "checkout.ts").write_text("old\n")
+        next_bin = checkout / "node_modules" / ".bin" / "next"
+        next_bin.parent.mkdir(parents=True)
+        next_bin.write_text("placeholder")
+
+    class Process:
+        pid = 2_000_000_000
+        returncode = None
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    async def create_process(*command, **kwargs):
+        return Process()
+
+    async def ready(url):
+        return True
+
+    class ResultBrowserRunner:
+        async def run(self, plan, *, app_url):
+            return BrowserExecutionResult(
+                status=browser_status,
+                completed_actions=1,
+                failed_action_index=None,
+                expected=None,
+                actual=None,
+                summary="Bounded browser result.",
+            )
+
+    monkeypatch.setattr(module, "create_scoped_installation_token", token)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(module, "_wait_for_app", ready)
+    service = FixValidationService(
+        settings=_settings(enabled=True, repositories="octo-org/checkout"),
+        browser_runner=ResultBrowserRunner(),
+        workspace_parent=tmp_path,
+        materializer=materialize,
+        port_selector=lambda: 46321,
+    )
+    plan = BrowserTestPlan.model_validate(
+        {"name": "Checkout", "actions": [{"type": "goto", "path": "/checkout"}]}
+    )
+
+    result = await service.validate(_context(reproduction_plan=plan))
+
+    browser_check = next(
+        check for check in result.checks if check.name == "Browser reproduction"
+    )
+    assert browser_check.status == check_status
+    assert result.status == overall_status
+    if check_status == "blocked":
+        assert "checks passed" not in result.summary.lower()
+
+
+@pytest.mark.anyio
 async def test_validation_app_uses_server_selected_non_fixed_port(
     monkeypatch, tmp_path
 ):

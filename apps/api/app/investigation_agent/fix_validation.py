@@ -150,6 +150,16 @@ class FixValidationService:
                 )
 
             after = await self._rerun_browser_when_supported(checkout, context, checks)
+            if after == "blocked" or any(
+                check.status == "blocked" for check in checks
+            ):
+                return _result(
+                    "blocked",
+                    "Browser verification could not run safely.",
+                    checks,
+                    context,
+                    "blocked",
+                )
             if after == "not_reproduced" and context.reproduction_before == "reproduced":
                 return _result(
                     "validated",
@@ -162,14 +172,6 @@ class FixValidationService:
                 return _result(
                     "validation_failed",
                     "The browser reproduction still reproduces the bug.",
-                    checks,
-                    context,
-                    after,
-                )
-            if after == "blocked":
-                return _result(
-                    "blocked",
-                    "Browser verification could not run safely.",
                     checks,
                     context,
                     after,
@@ -312,7 +314,7 @@ class FixValidationService:
                         ),
                     )
                 )
-                return None
+                return "blocked"
             checks.append(
                 FixValidationCheck(
                     name="Start isolated application",
@@ -326,11 +328,11 @@ class FixValidationService:
             checks.append(
                 FixValidationCheck(
                     name="Browser reproduction",
-                    status=(
-                        "passed"
-                        if execution.status == "not_reproduced"
-                        else "failed"
-                    ),
+                    status={
+                        "not_reproduced": "passed",
+                        "reproduced": "failed",
+                        "blocked": "blocked",
+                    }[execution.status],
                     output=execution.summary[:_MAX_OUTPUT],
                 )
             )
