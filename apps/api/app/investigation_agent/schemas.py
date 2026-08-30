@@ -112,8 +112,8 @@ class BrowserTestPlan(StrictSchema):
 class AgentInvestigationResult(StrictSchema):
     repository_findings: list[RepositoryFinding] = Field(max_length=30)
     duplicate_candidates: list[DuplicateCandidate] = Field(max_length=10)
-    reproduction_plan: BrowserTestPlan | None
-    cannot_reproduce_reason: Annotated[str, Field(max_length=5_000)] | None
+    reproduction_plan: BrowserTestPlan | None = None
+    cannot_reproduce_reason: Annotated[str, Field(max_length=5_000)] | None = None
 
     @model_validator(mode="after")
     def require_plan_or_reason(self) -> "AgentInvestigationResult":

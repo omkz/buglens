@@ -167,6 +167,47 @@ def test_browser_plan_rejects_external_urls_unsupported_actions_and_overlong_run
         )
 
 
+def test_agent_result_optional_plan_contract_remains_strict():
+    without_plan = AgentInvestigationResult.model_validate_json(
+        json.dumps(
+            {
+                "repository_findings": [],
+                "duplicate_candidates": [],
+                "cannot_reproduce_reason": "No application URL configured.",
+            }
+        )
+    )
+    assert without_plan.reproduction_plan is None
+
+    with_plan = AgentInvestigationResult.model_validate(
+        {
+            "repository_findings": [],
+            "duplicate_candidates": [],
+            "reproduction_plan": {
+                "name": "Checkout navigation",
+                "actions": [{"type": "goto", "path": "/checkout"}],
+            },
+        }
+    )
+    assert with_plan.reproduction_plan is not None
+    assert with_plan.cannot_reproduce_reason is None
+
+    with pytest.raises(ValidationError, match="missing browser plan requires a reason"):
+        AgentInvestigationResult.model_validate(
+            {"repository_findings": [], "duplicate_candidates": []}
+        )
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        AgentInvestigationResult.model_validate(
+            {
+                "repository_findings": [],
+                "duplicate_candidates": [],
+                "cannot_reproduce_reason": "No application URL configured.",
+                "unexpected": "field",
+            }
+        )
+
+
 @pytest.mark.anyio
 async def test_adk_agent_uses_ephemeral_runner_structured_output_and_security_prompt(
     monkeypatch,
