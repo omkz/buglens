@@ -106,6 +106,25 @@ export type AgentRunStatus = {
   progress: AgentRunProgress | null;
   github_issue_status: "creating" | "created" | "failed" | null;
   github_issue: GitHubIssue | null;
+  fix_validation: FixValidationResult | null;
+};
+
+export type FixValidationResult = {
+  status:
+    | "running"
+    | "validated"
+    | "validation_failed"
+    | "stale_proposal"
+    | "blocked"
+    | "not_run";
+  summary: string;
+  checks: Array<{
+    name: string;
+    status: "passed" | "failed" | "timed_out" | "blocked";
+    output: string;
+  }>;
+  reproduction_before: "reproduced" | "not_reproduced" | "blocked" | null;
+  reproduction_after: "reproduced" | "not_reproduced" | "blocked" | null;
 };
 
 export type AgentRunProgress = {

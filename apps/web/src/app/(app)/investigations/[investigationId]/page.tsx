@@ -112,6 +112,8 @@ export default function InvestigationDetailPage() {
     useState(false);
   const [isCreatingIssue, setIsCreatingIssue] = useState(false);
   const [issueError, setIssueError] = useState<string | null>(null);
+  const [isValidatingFix, setIsValidatingFix] = useState(false);
+  const [fixValidationError, setFixValidationError] = useState<string | null>(null);
   const issueRequestActiveRef = useRef(false);
   const investigationRequestActiveRef = useRef(false);
   const progressSourceRef = useRef<EventSource | null>(null);
@@ -544,6 +546,40 @@ export default function InvestigationDetailPage() {
     }
   }
 
+  async function validateFix() {
+    if (state.status !== "ready" || isValidatingFix) return;
+    setIsValidatingFix(true);
+    setFixValidationError(null);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/investigations/${encodeURIComponent(investigationId)}/fix-validation`,
+        { method: "POST", credentials: "include" },
+      );
+      const body = (await response.json().catch(() => null)) as
+        | AgentRunStatus
+        | { detail?: string }
+        | null;
+      if (!response.ok || !body || !("status" in body)) {
+        throw new Error(
+          body && "detail" in body && body.detail
+            ? body.detail
+            : "Fix validation failed. Please try again.",
+        );
+      }
+      setState((current) =>
+        current.status === "ready" ? { ...current, agentRun: body } : current,
+      );
+    } catch (error) {
+      setFixValidationError(
+        error instanceof Error
+          ? error.message
+          : "Fix validation failed. Please try again.",
+      );
+    } finally {
+      setIsValidatingFix(false);
+    }
+  }
+
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-6 py-16">
       <Link
@@ -776,6 +812,10 @@ export default function InvestigationDetailPage() {
                   isCreatingIssue={isCreatingIssue}
                   issueError={issueError}
                   onCreateIssue={createGitHubIssue}
+                  fixValidation={state.agentRun.fix_validation}
+                  isValidatingFix={isValidatingFix}
+                  fixValidationError={fixValidationError}
+                  onValidateFix={validateFix}
                 />
               )}
             </section>
@@ -943,6 +983,10 @@ function AgentRunResultView({
   isCreatingIssue,
   issueError,
   onCreateIssue,
+  fixValidation,
+  isValidatingFix,
+  fixValidationError,
+  onValidateFix,
 }: {
   result: AgentRunResult;
   githubIssueStatus: "creating" | "created" | "failed" | null;
@@ -950,6 +994,10 @@ function AgentRunResultView({
   isCreatingIssue: boolean;
   issueError: string | null;
   onCreateIssue: () => void;
+  fixValidation: AgentRunStatus["fix_validation"];
+  isValidatingFix: boolean;
+  fixValidationError: string | null;
+  onValidateFix: () => void;
 }) {
   const reproductionLabel = result.reproduction_status
     ? {
@@ -971,7 +1019,13 @@ function AgentRunResultView({
         ))}
       </ResultList>
 
-      <ProposedFix proposal={result.fix_proposal} />
+      <ProposedFix
+        proposal={result.fix_proposal}
+        validation={fixValidation}
+        isValidating={isValidatingFix}
+        error={fixValidationError}
+        onValidate={onValidateFix}
+      />
 
       <ResultList title="Possible duplicate issues" empty="No plausible duplicates found.">
         {result.duplicate_candidates.map((candidate) => (
@@ -1079,7 +1133,19 @@ function AgentRunResultView({
   );
 }
 
-function ProposedFix({ proposal }: { proposal: AgentRunResult["fix_proposal"] }) {
+function ProposedFix({
+  proposal,
+  validation,
+  isValidating,
+  error,
+  onValidate,
+}: {
+  proposal: AgentRunResult["fix_proposal"];
+  validation: AgentRunStatus["fix_validation"];
+  isValidating: boolean;
+  error: string | null;
+  onValidate: () => void;
+}) {
   if (proposal.status === "not_proposed") {
     return (
       <div className="flex flex-col gap-2 border-t border-zinc-800 pt-6">
@@ -1126,6 +1192,43 @@ function ProposedFix({ proposal }: { proposal: AgentRunResult["fix_proposal"] })
           </pre>
         </div>
       ))}
+      <div className="space-y-3 border-t border-zinc-800 pt-4">
+        <button
+          type="button"
+          onClick={onValidate}
+          disabled={isValidating || validation?.status === "running"}
+          className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {isValidating || validation?.status === "running" ? (
+            <AsyncActivity label="Validating fix…" />
+          ) : (
+            "Validate Fix"
+          )}
+        </button>
+        {error && <p className="text-sm text-red-400">{error}</p>}
+        {validation && validation.status !== "running" && (
+          <div className="space-y-3 rounded-md bg-zinc-900/60 p-4 text-sm">
+            <p className="font-medium capitalize text-zinc-200">
+              {validation.status.replaceAll("_", " ")}
+            </p>
+            <p className="text-zinc-400">{validation.summary}</p>
+            <ul className="space-y-2 text-zinc-400">
+              {validation.checks.map((check) => (
+                <li key={check.name}>
+                  <span className={check.status === "passed" ? "text-emerald-300" : "text-red-300"}>
+                    {check.status === "passed" ? "Pass" : "Fail"}
+                  </span>{" "}
+                  {check.name}
+                  {check.output && <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-xs text-zinc-600">{check.output}</pre>}
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-zinc-500">
+              Before: {validation.reproduction_before ?? "Not available"} · After: {validation.reproduction_after ?? "Not run"}
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

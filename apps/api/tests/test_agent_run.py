@@ -1643,6 +1643,7 @@ def test_get_agent_run_is_scoped_and_returns_stable_empty_shape(monkeypatch):
         "progress": None,
         "github_issue_status": None,
         "github_issue": None,
+        "fix_validation": None,
     }
     assert captured["installation_id"] == connection.installation_id
 

@@ -427,6 +427,7 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     assert "a9e0f1b2c3d4" in revisions  # add persisted AgentRun progress
     assert "b0f1c2d3e4f5" in revisions  # scope progress to one run attempt
     assert "c1d2e3f4a5b6" in revisions  # persist structured fix proposals
+    assert "d2e3f4a5b6c7" in revisions  # persist isolated fix validation results
 
 
 def test_agent_run_progress_schema_and_migration_are_constrained_and_reversible():
@@ -489,6 +490,31 @@ def test_agent_run_fix_proposal_schema_and_migration_are_reversible():
     assert 'sa.Column("fix_proposal", postgresql.JSONB(), nullable=True)' in source
     assert 'sa.Column("fix_proposal_reason", sa.Text(), nullable=True)' in source
     assert 'op.drop_column("investigation_agent_runs", "fix_proposal")' in source
+
+
+def test_fix_validation_schema_and_migration_are_constrained_and_reversible():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    table = Base.metadata.tables["investigation_agent_runs"]
+    assert isinstance(table.c.fix_validation_result.type, JSONB)
+    assert table.c.fix_validation_status.nullable
+    assert table.c.fix_validation_started_at.type.timezone is True
+    constraint = next(
+        item
+        for item in table.constraints
+        if item.name == "ck_investigation_agent_runs_fix_validation_status"
+    )
+    for status in models.FixValidationStatus:
+        assert status.value in str(constraint.sqltext)
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("d2e3f4a5b6c7")
+    source = Path(revision.path).read_text()
+    assert revision.down_revision == "c1d2e3f4a5b6"
+    assert "ck_investigation_agent_runs_fix_validation_status" in source
+    assert 'op.drop_column("investigation_agent_runs", "fix_validation_status")' in source
 
 
 def test_projects_migration_is_linear_and_supports_clean_downgrade():

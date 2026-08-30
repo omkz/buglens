@@ -44,16 +44,23 @@ from app.investigation_agent.github_issue import (
     GitHubIssuePublisher,
     build_github_issue,
 )
+from app.investigation_agent.fix_validation import (
+    FixValidationResult,
+    FixValidationService,
+)
 from app.investigation_agent.fixes import render_unified_diff
 from app.investigation_agent.repository import (
     AgentRunClaimState,
+    FixValidationClaimState,
     GitHubIssueClaimState,
     PersistedAgentRun,
     PublishedGitHubIssue,
     claim_agent_run,
+    claim_fix_validation,
     claim_github_issue_publication,
     complete_github_issue_publication,
     complete_agent_run,
+    complete_fix_validation,
     get_agent_run as load_agent_run,
     mark_github_issue_publication_failed,
     mark_agent_run_failed,
@@ -211,6 +218,7 @@ class AgentRunStatusResponse(BaseModel):
     progress: AgentRunProgressResponse | None
     github_issue_status: models.GitHubIssuePublicationStatus | None
     github_issue: GitHubIssueResponse | None
+    fix_validation: FixValidationResult | None
 
 
 class GitHubIssuePublicationResponse(BaseModel):
@@ -258,6 +266,17 @@ def get_investigation_agent_service(
         allow_private_network=settings.playwright_allow_private_network,
     )
     return InvestigationAgentService(agent=agent, runner=runner, settings=settings)
+
+
+def get_fix_validation_service(
+    settings: Settings = Depends(get_settings),
+) -> FixValidationService:
+    runner = PlaywrightPlanRunner(
+        action_timeout_ms=settings.playwright_action_timeout_ms,
+        run_timeout_seconds=settings.playwright_run_timeout_seconds,
+        allow_private_network=True,
+    )
+    return FixValidationService(settings=settings, browser_runner=runner)
 
 
 def get_github_issue_publisher(
@@ -920,6 +939,55 @@ async def get_agent_investigation(
     return _agent_run_response(investigation_id, snapshot.run)
 
 
+@router.post(
+    "/investigations/{investigation_id}/fix-validation",
+    response_model=AgentRunStatusResponse,
+)
+async def validate_investigation_fix(
+    investigation_id: uuid.UUID,
+    request: Request,
+    validation_service: FixValidationService = Depends(get_fix_validation_service),
+    db: AsyncSession = Depends(get_db),
+) -> AgentRunStatusResponse:
+    connection = await _require_connection(request, db)
+    try:
+        claim = await claim_fix_validation(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+        )
+        if claim.state == FixValidationClaimState.NOT_FOUND:
+            raise HTTPException(status_code=404, detail="Investigation not found.")
+        if claim.state == FixValidationClaimState.NO_COMPLETED_RUN:
+            raise HTTPException(status_code=400, detail="A completed autonomous investigation is required.")
+        if claim.state == FixValidationClaimState.NO_FIX_PROPOSAL:
+            raise HTTPException(status_code=400, detail="No fix proposal is available to validate.")
+        if claim.state == FixValidationClaimState.CONFLICT:
+            raise HTTPException(status_code=409, detail="Fix validation is already running.")
+        if claim.state == FixValidationClaimState.COMPLETED:
+            await db.rollback()
+            snapshot = await load_agent_run(db, installation_id=connection.installation_id, investigation_id=investigation_id)
+            return _agent_run_response(investigation_id, snapshot.run)
+        await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
+    except SQLAlchemyError:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="Fix validation is temporarily unavailable.") from None
+
+    if claim.context is None:
+        raise HTTPException(status_code=503, detail="Fix validation is temporarily unavailable.")
+    result = await validation_service.validate(claim.context)
+    try:
+        run = await complete_fix_validation(db, investigation_id=investigation_id, result=result)
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="Fix validation is temporarily unavailable.") from None
+    return _agent_run_response(investigation_id, run)
+
+
 @router.get(
     "/investigations/{investigation_id}/agent-run/events",
     response_class=StreamingResponse,
@@ -1090,6 +1158,7 @@ def _agent_run_response(
             progress=None,
             github_issue_status=None,
             github_issue=None,
+            fix_validation=None,
         )
     result = None
     if run.status == models.AgentRunStatus.COMPLETED.value:
@@ -1180,6 +1249,27 @@ def _agent_run_response(
             and run.github_issue_title is not None
             and run.github_issue_url is not None
             else None
+        ),
+        fix_validation=(
+            FixValidationResult.model_validate(run.fix_validation_result)
+            if run.fix_validation_result is not None
+            else (
+                FixValidationResult(
+                    status="running",
+                    summary="Fix validation is running.",
+                    checks=[],
+                    reproduction_before=(
+                        run.reproduction_status
+                        if run.reproduction_status
+                        in {"reproduced", "not_reproduced", "blocked"}
+                        else None
+                    ),
+                    reproduction_after=None,
+                )
+                if run.fix_validation_status
+                == models.FixValidationStatus.RUNNING.value
+                else None
+            )
         ),
     )
 

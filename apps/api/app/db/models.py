@@ -299,6 +299,15 @@ class AgentRunProgressStage(StrEnum):
     FAILED = "failed"
 
 
+class FixValidationStatus(StrEnum):
+    RUNNING = "running"
+    VALIDATED = "validated"
+    VALIDATION_FAILED = "validation_failed"
+    STALE_PROPOSAL = "stale_proposal"
+    BLOCKED = "blocked"
+    NOT_RUN = "not_run"
+
+
 class InvestigationAgentRun(Base):
     """One current autonomous repository/browser investigation result."""
 
@@ -324,6 +333,12 @@ class InvestigationAgentRun(Base):
             "'preparing_reproduction', 'running_browser', 'completed', 'failed')",
             name="ck_investigation_agent_runs_progress_stage",
         ),
+        CheckConstraint(
+            "fix_validation_status IS NULL OR fix_validation_status IN "
+            "('running', 'validated', 'validation_failed', 'stale_proposal', "
+            "'blocked', 'not_run')",
+            name="ck_investigation_agent_runs_fix_validation_status",
+        ),
         UniqueConstraint(
             "investigation_id",
             name="uq_investigation_agent_runs_investigation_id",
@@ -340,6 +355,9 @@ class InvestigationAgentRun(Base):
     duplicate_candidates: Mapped[list[dict]] = mapped_column(JSONB)
     fix_proposal: Mapped[dict | None] = mapped_column(JSONB)
     fix_proposal_reason: Mapped[str | None] = mapped_column(Text)
+    fix_validation_status: Mapped[str | None]
+    fix_validation_result: Mapped[dict | None] = mapped_column(JSONB)
+    fix_validation_started_at: Mapped[datetime | None]
     reproduction_plan: Mapped[dict | None] = mapped_column(JSONB)
     generated_test: Mapped[str | None] = mapped_column(Text)
     reproduction_status: Mapped[str | None]

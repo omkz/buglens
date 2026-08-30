@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models
 
-from .schemas import AgentInvestigationResult, BrowserExecutionResult
+from .fix_validation import FixValidationContext, FixValidationResult
+from .schemas import (
+    AgentInvestigationResult,
+    BrowserExecutionResult,
+    BrowserTestPlan,
+    FixProposal,
+)
 
 if TYPE_CHECKING:
     from app.investigations.analyzer import BugAnalysis
@@ -24,6 +30,15 @@ class AgentRunClaimState(StrEnum):
     NOT_FOUND = "not_found"
     NO_ANALYSIS = "no_analysis"
     CONFLICT = "conflict"
+
+
+class FixValidationClaimState(StrEnum):
+    READY = "ready"
+    NOT_FOUND = "not_found"
+    NO_COMPLETED_RUN = "no_completed_run"
+    NO_FIX_PROPOSAL = "no_fix_proposal"
+    CONFLICT = "conflict"
+    COMPLETED = "completed"
 
 
 @dataclass(frozen=True)
@@ -40,6 +55,13 @@ class AgentRunContext:
 class AgentRunClaim:
     state: AgentRunClaimState
     context: AgentRunContext | None = None
+
+
+@dataclass(frozen=True)
+class FixValidationClaim:
+    state: FixValidationClaimState
+    context: FixValidationContext | None = None
+    result: FixValidationResult | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +89,9 @@ class PersistedAgentRun:
     run_attempt_id: uuid.UUID | None = None
     fix_proposal: dict | None = None
     fix_proposal_reason: str | None = None
+    fix_validation_status: str | None = None
+    fix_validation_result: dict | None = None
+    fix_validation_started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +134,7 @@ class AgentRunSnapshot:
 
 
 _PUBLICATION_STALE_AFTER = timedelta(minutes=5)
+_FIX_VALIDATION_STALE_AFTER = timedelta(minutes=10)
 
 
 async def claim_agent_run(
@@ -175,6 +201,9 @@ async def claim_agent_run(
             duplicate_candidates=[],
             fix_proposal=None,
             fix_proposal_reason=None,
+            fix_validation_status=None,
+            fix_validation_result=None,
+            fix_validation_started_at=None,
             reproduction_plan=None,
             generated_test=None,
             reproduction_status=None,
@@ -202,6 +231,9 @@ async def claim_agent_run(
         run.duplicate_candidates = []
         run.fix_proposal = None
         run.fix_proposal_reason = None
+        run.fix_validation_status = None
+        run.fix_validation_result = None
+        run.fix_validation_started_at = None
         run.reproduction_plan = None
         run.generated_test = None
         run.reproduction_status = None
@@ -373,6 +405,74 @@ async def get_agent_run(
     )
 
 
+async def claim_fix_validation(
+    db: AsyncSession, *, installation_id: uuid.UUID, investigation_id: uuid.UUID
+) -> FixValidationClaim:
+    row = (
+        await db.execute(
+            select(models.Project, models.GitHubInstallation, models.InvestigationAgentRun)
+            .join(models.Investigation, models.Investigation.project_id == models.Project.id)
+            .join(models.GitHubInstallation, models.Project.github_installation_id == models.GitHubInstallation.id)
+            .outerjoin(models.InvestigationAgentRun, models.InvestigationAgentRun.investigation_id == models.Investigation.id)
+            .where(models.Investigation.id == investigation_id, models.Project.github_installation_id == installation_id)
+            .with_for_update(of=models.Project)
+        )
+    ).first()
+    if row is None:
+        return FixValidationClaim(state=FixValidationClaimState.NOT_FOUND)
+    project, installation, run = row
+    if run is None or run.status != models.AgentRunStatus.COMPLETED.value:
+        return FixValidationClaim(state=FixValidationClaimState.NO_COMPLETED_RUN)
+    if run.fix_proposal is None:
+        return FixValidationClaim(state=FixValidationClaimState.NO_FIX_PROPOSAL)
+    now = datetime.now(UTC)
+    if (
+        run.fix_validation_status == models.FixValidationStatus.RUNNING.value
+        and run.fix_validation_started_at is not None
+        and run.fix_validation_started_at > now - _FIX_VALIDATION_STALE_AFTER
+    ):
+        return FixValidationClaim(state=FixValidationClaimState.CONFLICT)
+    if run.fix_validation_status == models.FixValidationStatus.VALIDATED.value and run.fix_validation_result:
+        return FixValidationClaim(
+            state=FixValidationClaimState.COMPLETED,
+            result=FixValidationResult.model_validate(run.fix_validation_result),
+        )
+    run.fix_validation_status = models.FixValidationStatus.RUNNING.value
+    run.fix_validation_result = None
+    run.fix_validation_started_at = now
+    await db.flush()
+    return FixValidationClaim(
+        state=FixValidationClaimState.READY,
+        context=FixValidationContext(
+            github_installation_id=installation.github_installation_id,
+            repository_full_name=project.github_repository_full_name,
+            default_branch=project.default_branch,
+            fix_proposal=FixProposal.model_validate(run.fix_proposal),
+            reproduction_plan=(BrowserTestPlan.model_validate(run.reproduction_plan) if run.reproduction_plan else None),
+            reproduction_before=run.reproduction_status,
+        ),
+    )
+
+
+async def complete_fix_validation(
+    db: AsyncSession, *, investigation_id: uuid.UUID, result: FixValidationResult
+) -> PersistedAgentRun:
+    run = (
+        await db.execute(
+            select(models.InvestigationAgentRun)
+            .where(
+                models.InvestigationAgentRun.investigation_id == investigation_id,
+                models.InvestigationAgentRun.fix_validation_status == models.FixValidationStatus.RUNNING.value,
+            )
+            .with_for_update()
+        )
+    ).scalar_one()
+    run.fix_validation_status = result.status
+    run.fix_validation_result = result.model_dump(mode="json")
+    await db.flush()
+    return _to_persisted(run)
+
+
 async def claim_github_issue_publication(
     db: AsyncSession,
     *,
@@ -520,6 +620,9 @@ def _to_persisted(run: models.InvestigationAgentRun) -> PersistedAgentRun:
         duplicate_candidates=run.duplicate_candidates,
         fix_proposal=run.fix_proposal,
         fix_proposal_reason=run.fix_proposal_reason,
+        fix_validation_status=run.fix_validation_status,
+        fix_validation_result=run.fix_validation_result,
+        fix_validation_started_at=run.fix_validation_started_at,
         reproduction_plan=run.reproduction_plan,
         generated_test=run.generated_test,
         reproduction_status=run.reproduction_status,
