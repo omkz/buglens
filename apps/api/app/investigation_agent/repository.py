@@ -135,6 +135,7 @@ class AgentRunSnapshot:
 
 _PUBLICATION_STALE_AFTER = timedelta(minutes=5)
 _FIX_VALIDATION_STALE_AFTER = timedelta(minutes=10)
+_AGENT_RUN_STALE_GRACE = timedelta(seconds=30)
 
 
 async def claim_agent_run(
@@ -144,6 +145,7 @@ async def claim_agent_run(
     investigation_id: uuid.UUID,
     agent_model: str,
     attempt_id: uuid.UUID,
+    agent_run_timeout_seconds: float = 180,
 ) -> AgentRunClaim:
     """Authorize and atomically claim the one current run row."""
     row = (
@@ -188,10 +190,18 @@ async def claim_agent_run(
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if run is not None and run.status != models.AgentRunStatus.FAILED.value:
-        return AgentRunClaim(state=AgentRunClaimState.CONFLICT)
-
     started_at = datetime.now(UTC)
+    if run is not None:
+        if run.status == models.AgentRunStatus.RUNNING.value:
+            last_activity = run.progress_updated_at or run.started_at
+            stale_before = started_at - timedelta(
+                seconds=agent_run_timeout_seconds
+            ) - _AGENT_RUN_STALE_GRACE
+            if last_activity is None or last_activity >= stale_before:
+                return AgentRunClaim(state=AgentRunClaimState.CONFLICT)
+        elif run.status != models.AgentRunStatus.FAILED.value:
+            return AgentRunClaim(state=AgentRunClaimState.CONFLICT)
+
     if run is None:
         run = models.InvestigationAgentRun(
             investigation_id=investigation_id,

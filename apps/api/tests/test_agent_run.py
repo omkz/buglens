@@ -678,7 +678,79 @@ async def test_github_tools_bound_tree_reads_issue_results_and_never_return_toke
         ("investigating_repository", "Scanning repository files…"),
         ("investigating_repository", "Reading src/checkout.ts…"),
         ("searching_duplicates", "Searching for possible duplicate issues…"),
+        ("investigating_repository", "Reviewing investigation findings…"),
     ]
+
+
+@pytest.mark.anyio
+async def test_issue_search_budget_is_bounded_and_finishes_progress(monkeypatch):
+    from app.investigation_agent.tools import github as tool_module
+
+    calls = 0
+
+    async def issues(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr(tool_module.github_client, "search_repository_issues", issues)
+    progress = []
+
+    async def report(stage, message):
+        progress.append((stage, message))
+
+    context = GitHubToolContext(
+        installation_token="installation-token",
+        repository_full_name="octo-org/checkout",
+        default_branch="main",
+        progress_callback=report,
+    )
+    search = context.tools()[2]
+
+    results = [await search(f"checkout {index}") for index in range(4)]
+
+    assert calls == 3
+    assert all(result["ok"] for result in results[:3])
+    assert results[3] == {
+        "ok": False,
+        "error": "Issue search budget is exhausted.",
+    }
+    assert progress[-1] == (
+        "investigating_repository",
+        "Reviewing investigation findings…",
+    )
+    assert progress.count(
+        ("searching_duplicates", "Searching for possible duplicate issues…")
+    ) == 3
+
+
+@pytest.mark.anyio
+async def test_failed_issue_search_moves_progress_to_reviewing(monkeypatch):
+    from app.investigation_agent.tools import github as tool_module
+
+    async def issues(*args, **kwargs):
+        raise github_client.GitHubAPIError("unavailable")
+
+    monkeypatch.setattr(tool_module.github_client, "search_repository_issues", issues)
+    progress = []
+
+    async def report(stage, message):
+        progress.append((stage, message))
+
+    context = GitHubToolContext(
+        installation_token="installation-token",
+        repository_full_name="octo-org/checkout",
+        default_branch="main",
+        progress_callback=report,
+    )
+
+    result = await context.tools()[2]("checkout")
+
+    assert result == {"ok": False, "error": "Repository issues are unavailable."}
+    assert progress[-1] == (
+        "investigating_repository",
+        "Reviewing investigation findings…",
+    )
 
 
 @pytest.mark.anyio
@@ -1008,6 +1080,7 @@ async def test_service_emits_progress_only_at_trusted_orchestration_boundaries(
         settings=SimpleNamespace(
             google_cloud_project="orbital-wharf-427808-p5",
             google_cloud_location="global",
+            agent_run_timeout_seconds=1,
             playwright_allow_private_network=False,
         ),
     )
@@ -1029,6 +1102,77 @@ async def test_service_emits_progress_only_at_trusted_orchestration_boundaries(
         ("preparing_reproduction", "Preparing browser reproduction…"),
         ("running_browser", "Running browser reproduction…"),
     ]
+
+
+@pytest.mark.anyio
+async def test_service_converts_agent_timeout_to_safe_provider_failure(monkeypatch):
+    from app.investigation_agent import service as service_module
+
+    cancelled = False
+
+    class Agent:
+        model_name = "gemini-test-model"
+
+        async def investigate(self, **kwargs):
+            nonlocal cancelled
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled = True
+
+    async def token(**kwargs):
+        return "short-lived-token"
+
+    monkeypatch.setattr(service_module, "create_scoped_installation_token", token)
+    service = InvestigationAgentService(
+        agent=Agent(),
+        runner=SimpleNamespace(),
+        settings=SimpleNamespace(
+            google_cloud_project="orbital-wharf-427808-p5",
+            google_cloud_location="global",
+            agent_run_timeout_seconds=0.01,
+        ),
+    )
+
+    with pytest.raises(AgentProviderError) as exc_info:
+        await service.investigate(_context())
+
+    assert exc_info.value.kind == "timeout"
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+    assert str(exc_info.value) == "Autonomous investigation provider failed."
+    assert cancelled is True
+
+
+@pytest.mark.anyio
+async def test_service_success_below_agent_timeout_is_unchanged(monkeypatch):
+    from app.investigation_agent import service as service_module
+
+    class Agent:
+        model_name = "gemini-test-model"
+
+        async def investigate(self, **kwargs):
+            await asyncio.sleep(0)
+            return _result(with_plan=False)
+
+    async def token(**kwargs):
+        return "short-lived-token"
+
+    monkeypatch.setattr(service_module, "create_scoped_installation_token", token)
+    service = InvestigationAgentService(
+        agent=Agent(),
+        runner=SimpleNamespace(),
+        settings=SimpleNamespace(
+            google_cloud_project="orbital-wharf-427808-p5",
+            google_cloud_location="global",
+            agent_run_timeout_seconds=1,
+        ),
+    )
+
+    result, generated_test, execution = await service.investigate(_context())
+
+    assert result == _result(with_plan=False)
+    assert generated_test is None
+    assert execution is None
 
 
 class _FakeLocator:
@@ -1174,6 +1318,7 @@ class _FakeDb:
 
 class _FakeAgentService:
     model_name = "gemini-test-model"
+    agent_run_timeout_seconds = 180
 
     def __init__(self, outcome=None):
         self.outcome = outcome or (
@@ -1465,6 +1610,58 @@ def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatc
         )
     ]
     assert "raw-invalid-model-value" not in repr(warnings)
+
+
+def test_agent_timeout_uses_existing_safe_route_failure_path(monkeypatch):
+    service = _FakeAgentService(AgentProviderError(kind="timeout"))
+    service.agent_run_timeout_seconds = 12
+    client, app, routes, _connection = _connected_client(monkeypatch, service)
+    context = _context()
+    attempt_id = uuid.uuid4()
+    captured = {}
+    failed = []
+    warnings = []
+
+    class CapturingLogger:
+        def warning(self, event, **kwargs):
+            warnings.append((event, kwargs))
+
+    async def claim(*args, **kwargs):
+        captured.update(kwargs)
+        return AgentRunClaim(state=AgentRunClaimState.READY, context=context)
+
+    async def mark(*args, **kwargs):
+        failed.append((kwargs["investigation_id"], kwargs["attempt_id"]))
+
+    monkeypatch.setattr(routes, "claim_agent_run", claim)
+    monkeypatch.setattr(routes, "mark_agent_run_failed", mark)
+    monkeypatch.setattr(routes, "logger", CapturingLogger())
+    try:
+        response = client.post(
+            f"/api/investigations/{context.investigation_id}/agent-run",
+            json={"attempt_id": str(attempt_id)},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Autonomous investigation failed. Please try again."
+    }
+    assert captured["agent_run_timeout_seconds"] == 12
+    assert failed == [(context.investigation_id, attempt_id)]
+    assert warnings == [
+        (
+            "agent_run_provider_failed",
+            {
+                "investigation_id": str(context.investigation_id),
+                "failure_kind": "timeout",
+                "exception_type": "AgentProviderError",
+                "exc_info": True,
+                "safe_exc_info": True,
+            },
+        )
+    ]
 
 
 def test_agent_result_failure_uses_separate_safe_logging_path(monkeypatch):

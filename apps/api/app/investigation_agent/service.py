@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -11,7 +12,11 @@ from app.config import Settings
 from app.integrations.github import client as github_client
 from app.integrations.github.access import create_scoped_installation_token
 
-from .agent import AgentConfigurationError, RepositoryInvestigationAgent
+from .agent import (
+    AgentConfigurationError,
+    AgentProviderError,
+    RepositoryInvestigationAgent,
+)
 from .fixes import MAX_FIX_CONTENT_BYTES, is_forbidden_fix_path
 from .repository import AgentRunContext
 from .schemas import AgentInvestigationResult, BrowserExecutionResult
@@ -53,6 +58,10 @@ class InvestigationAgentService:
     def model_name(self) -> str:
         return self.agent.model_name
 
+    @property
+    def agent_run_timeout_seconds(self) -> float:
+        return getattr(self.settings, "agent_run_timeout_seconds", 180)
+
     async def investigate(
         self,
         context: AgentRunContext,
@@ -89,12 +98,18 @@ class InvestigationAgentService:
                 raise InvestigationResultError(
                     "Persisted repository metadata is invalid."
                 ) from exc
-            result = await self.agent.investigate(
-                investigation_id=context.investigation_id,
-                analysis=context.analysis,
-                application_url_configured=context.app_url is not None,
-                tools=github_tools.tools(),
-            )
+            try:
+                async with asyncio.timeout(
+                    self.agent_run_timeout_seconds
+                ):
+                    result = await self.agent.investigate(
+                        investigation_id=context.investigation_id,
+                        analysis=context.analysis,
+                        application_url_configured=context.app_url is not None,
+                        tools=github_tools.tools(),
+                    )
+            except TimeoutError as exc:
+                raise AgentProviderError(kind="timeout") from exc
             if github_tools.had_github_failure and not github_tools.known_paths:
                 raise InvestigationGitHubError("GitHub is unavailable.")
             _validate_agent_result(result, github_tools)

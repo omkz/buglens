@@ -774,6 +774,7 @@ async def run_agent_investigation(
             investigation_id=investigation_id,
             agent_model=agent_service.model_name,
             attempt_id=payload.attempt_id,
+            agent_run_timeout_seconds=agent_service.agent_run_timeout_seconds,
         )
         if claim.state == AgentRunClaimState.NOT_FOUND:
             await db.rollback()

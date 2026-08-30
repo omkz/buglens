@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from base64 import b64encode
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import itsdangerous
@@ -582,6 +582,49 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert concurrent_claim.state == AgentRunClaimState.CONFLICT
                 await db.rollback()
 
+                stale_row = (
+                    await db.execute(
+                        select(models.InvestigationAgentRun).where(
+                            models.InvestigationAgentRun.investigation_id
+                            == first_investigation.id
+                        )
+                    )
+                ).scalar_one()
+                stale_row.repository_summary = [{"path": "stale.py"}]
+                stale_row.duplicate_candidates = [{"number": 1}]
+                stale_row.progress_stage = (
+                    models.AgentRunProgressStage.SEARCHING_DUPLICATES.value
+                )
+                stale_row.progress_message = (
+                    "Searching for possible duplicate issues…"
+                )
+                stale_row.progress_updated_at = datetime.now(
+                    timezone.utc
+                ) - timedelta(seconds=32)
+                await db.commit()
+
+                stale_attempt_id = uuid.uuid4()
+                stale_claim = await claim_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                    agent_model="gemini-test-model",
+                    attempt_id=stale_attempt_id,
+                    agent_run_timeout_seconds=1,
+                )
+                assert stale_claim.state == AgentRunClaimState.READY
+                await db.commit()
+                reclaimed_snapshot = await get_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert reclaimed_snapshot.run is not None
+                assert reclaimed_snapshot.run.repository_summary is None
+                assert reclaimed_snapshot.run.duplicate_candidates == []
+                assert reclaimed_snapshot.run.progress_stage == "starting"
+                assert reclaimed_snapshot.run.run_attempt_id == stale_attempt_id
+
                 running_publication = await claim_github_issue_publication(
                     db,
                     installation_id=first_connection.installation_id,
@@ -596,7 +639,7 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 await mark_agent_run_failed(
                     db,
                     investigation_id=first_investigation.id,
-                    attempt_id=first_attempt_id,
+                    attempt_id=stale_attempt_id,
                 )
                 await db.commit()
                 failed_snapshot = await get_agent_run(
@@ -653,6 +696,7 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert retry_snapshot.run.progress_message == "Starting investigation…"
                 assert retry_snapshot.run.run_attempt_id == retry_attempt_id
                 assert retry_snapshot.run.run_attempt_id != first_attempt_id
+                assert retry_snapshot.run.run_attempt_id != stale_attempt_id
                 await mark_agent_run_failed(
                     db,
                     investigation_id=first_investigation.id,
@@ -716,6 +760,17 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 assert run_snapshot.accessible is True
                 assert run_snapshot.run is not None
                 assert run_snapshot.run.id == persisted_run.id
+
+                completed_claim = await claim_agent_run(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                    agent_model="gemini-test-model",
+                    attempt_id=uuid.uuid4(),
+                    agent_run_timeout_seconds=1,
+                )
+                assert completed_claim.state == AgentRunClaimState.CONFLICT
+                await db.rollback()
 
                 inaccessible_publication = await claim_github_issue_publication(
                     db,

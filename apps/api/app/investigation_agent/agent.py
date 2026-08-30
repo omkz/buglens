@@ -64,6 +64,7 @@ AgentProviderFailureKind = Literal[
     "no_structured_result",
     "invalid_structured_result",
     "adk_runtime_error",
+    "timeout",
 ]
 _MAX_VALIDATION_DIAGNOSTICS = 10
 

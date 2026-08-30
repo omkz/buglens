@@ -16,6 +16,7 @@ _MAX_TREE_FILES = 500
 _MAX_FILE_BYTES = 100 * 1024
 _MAX_TOTAL_FILE_BYTES = 300 * 1024
 _MAX_FILES_READ = 12
+_MAX_ISSUE_SEARCHES = 3
 _IGNORED_SEGMENTS = {
     ".git",
     ".next",
@@ -53,6 +54,7 @@ class GitHubToolContext:
         self._tree: dict[str, github_client.GitHubRepositoryFile] | None = None
         self._bytes_read = 0
         self._files_read = 0
+        self._issue_searches = 0
         self.read_paths: set[str] = set()
         self.read_files: dict[str, str] = {}
         self.returned_issues: dict[int, github_client.GitHubIssue] = {}
@@ -108,6 +110,9 @@ class GitHubToolContext:
             query = query.strip()
             if not query or len(query) > 500:
                 return {"ok": False, "error": "Issue search query is invalid."}
+            if context._issue_searches >= _MAX_ISSUE_SEARCHES:
+                return {"ok": False, "error": "Issue search budget is exhausted."}
+            context._issue_searches += 1
             if context._progress_callback is not None:
                 await context._progress_callback(
                     "searching_duplicates",
@@ -123,7 +128,17 @@ class GitHubToolContext:
                 )
             except (github_client.GitHubAPIError, httpx.HTTPError):
                 context.had_github_failure = True
+                if context._progress_callback is not None:
+                    await context._progress_callback(
+                        "investigating_repository",
+                        "Reviewing investigation findings…",
+                    )
                 return {"ok": False, "error": "Repository issues are unavailable."}
+            if context._progress_callback is not None:
+                await context._progress_callback(
+                    "investigating_repository",
+                    "Reviewing investigation findings…",
+                )
             context.returned_issues.update({issue.number: issue for issue in issues})
             return {
                 "ok": True,

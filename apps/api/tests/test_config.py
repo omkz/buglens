@@ -47,6 +47,7 @@ def test_database_pool_and_local_development_defaults(monkeypatch):
     assert settings.evidence_storage_backend == "local"
     assert str(settings.evidence_storage_dir) == ".data/evidence"
     assert settings.playwright_allow_private_network is False
+    assert settings.agent_run_timeout_seconds == 180
     assert settings.fix_validation_allow_host_execution is False
     assert settings.trusted_fix_validation_repositories == frozenset()
     assert settings.frontend_base_url == "http://localhost:3000"
@@ -101,3 +102,9 @@ def test_vertex_ai_environment_configuration(monkeypatch):
 def test_invalid_database_pool_configuration_is_rejected(field, value):
     with pytest.raises(ValidationError, match=field):
         _settings(**{field: value})
+
+
+@pytest.mark.parametrize("value", [0, -1, 901])
+def test_invalid_agent_run_timeout_is_rejected(value):
+    with pytest.raises(ValidationError, match="agent_run_timeout_seconds"):
+        _settings(agent_run_timeout_seconds=value)
