@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { API_BASE_URL } from "@/lib/config";
+import { AsyncActivity } from "../../_components/async-activity";
 import { EvidenceRecorder } from "../_components/evidence-recorder";
 import { shouldShowAnalyzeBug } from "@/lib/analysis-availability.mjs";
 import type {
@@ -83,6 +84,14 @@ function isAgentRunProgressStage(
     "failed",
   ].includes(value);
 }
+
+const investigationSteps = [
+  { stage: "starting", label: "Starting investigation" },
+  { stage: "investigating_repository", label: "Investigating repository" },
+  { stage: "searching_duplicates", label: "Searching duplicate issues" },
+  { stage: "preparing_reproduction", label: "Preparing reproduction" },
+  { stage: "running_browser", label: "Running browser reproduction" },
+] as const;
 
 export default function InvestigationDetailPage() {
   const { investigationId } = useParams<{ investigationId: string }>();
@@ -545,7 +554,7 @@ export default function InvestigationDetailPage() {
       </Link>
 
       {state.status === "loading" && (
-        <p className="text-sm text-zinc-500">Loading investigation…</p>
+        <InvestigationDetailSkeleton />
       )}
 
       {state.status === "error" && (
@@ -672,9 +681,21 @@ export default function InvestigationDetailPage() {
             )}
 
             {(state.investigation.status === "running" || isAnalyzing) && (
-              <p className="text-sm text-zinc-300">
-                Analyzing report and any evidence…
-              </p>
+              <div
+                className="flex max-w-xl flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-950/40 p-4 text-sm text-zinc-300"
+              >
+                <AsyncActivity label="Analyzing report and evidence…" />
+                <div
+                  role="progressbar"
+                  aria-label="Bug analysis in progress"
+                  className="h-1 overflow-hidden rounded-full bg-zinc-800"
+                >
+                  <div
+                    aria-hidden="true"
+                    className="h-full w-2/5 animate-pulse rounded-full bg-zinc-400/70 motion-reduce:animate-none"
+                  />
+                </div>
+              </div>
             )}
 
             {state.investigation.status === "failed" && !isAnalyzing && (
@@ -726,34 +747,19 @@ export default function InvestigationDetailPage() {
                   </button>
                 )}
 
-              {(state.agentRun.status === "running" || isInvestigating) && (
-                <div className="flex flex-col gap-2 rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
-                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                    Investigation progress
-                  </p>
-                  <p className="text-sm font-medium text-zinc-200">
-                    {progressStageLabel(state.agentRun.progress?.stage)}
-                  </p>
-                  <p className="text-sm text-zinc-400">
-                    {state.agentRun.progress?.message ||
-                      "Starting investigation…"}
-                  </p>
-                  {liveProgressDisconnected && isInvestigating && (
-                    <p className="text-xs text-amber-500/80">
-                      Live progress disconnected. The investigation is still running.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {state.agentRun.status === "failed" && !isInvestigating && (
-                <p className="text-sm text-red-300">Investigation failed.</p>
-              )}
-
-              {state.agentRun.status === "completed" && !isInvestigating && (
-                <p className="text-sm text-emerald-300">
-                  Investigation completed.
-                </p>
+              {(state.agentRun.status !== null || isInvestigating) && (
+                <InvestigationProgress
+                  stage={
+                    state.agentRun.progress?.stage ??
+                    (state.agentRun.status === "completed"
+                      ? "completed"
+                      : state.agentRun.status === "failed"
+                        ? "failed"
+                        : undefined)
+                  }
+                  message={state.agentRun.progress?.message}
+                  disconnected={liveProgressDisconnected && isInvestigating}
+                />
               )}
 
               {investigationError && (
@@ -775,6 +781,156 @@ export default function InvestigationDetailPage() {
             </section>
           )}
         </article>
+      )}
+    </div>
+  );
+}
+
+function InvestigationDetailSkeleton() {
+  return (
+    <div role="status" aria-live="polite" className="flex flex-col gap-8">
+      <span className="sr-only">Loading investigation…</span>
+      <div
+        aria-hidden="true"
+        className="flex animate-pulse flex-col gap-8 motion-reduce:animate-none"
+      >
+        <div className="flex flex-col gap-3">
+          <div className="h-7 w-3/5 rounded bg-zinc-800" />
+          <div className="h-4 w-2/5 rounded bg-zinc-900" />
+          <div className="h-3 w-1/4 rounded bg-zinc-900" />
+        </div>
+        <div className="h-28 rounded-lg border border-zinc-800 bg-zinc-950/50" />
+        <div className="flex flex-col gap-3">
+          <div className="h-5 w-24 rounded bg-zinc-800" />
+          <div className="h-16 rounded-lg border border-zinc-800 bg-zinc-950/50" />
+        </div>
+        <div className="flex flex-col gap-3 border-t border-zinc-800 pt-8">
+          <div className="h-5 w-32 rounded bg-zinc-800" />
+          <div className="h-20 rounded-lg border border-zinc-800 bg-zinc-950/50" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InvestigationProgress({
+  stage,
+  message,
+  disconnected,
+}: {
+  stage: AgentRunProgress["stage"] | undefined;
+  message: string | undefined;
+  disconnected: boolean;
+}) {
+  const activeIndex = investigationSteps.findIndex(
+    (step) => step.stage === stage,
+  );
+  const completed = stage === "completed";
+  const failed = stage === "failed";
+  const progressMessage =
+    message ||
+    (completed
+      ? "Investigation completed."
+      : failed
+        ? "Investigation failed."
+        : stage
+          ? progressStageLabel(stage)
+          : "Waiting for live progress…");
+
+  return (
+    <div className="flex flex-col gap-4 rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
+      <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+        Investigation progress
+      </p>
+      <ol className="grid gap-2 sm:grid-cols-2">
+        {investigationSteps.map((step, index) => {
+          const stepCompleted = completed || (activeIndex >= 0 && index < activeIndex);
+          const active = index === activeIndex;
+          return (
+            <li
+              key={step.stage}
+              aria-current={active ? "step" : undefined}
+              className={`flex items-center gap-2 text-xs ${
+                stepCompleted
+                  ? "text-emerald-300"
+                  : active
+                    ? "text-zinc-100"
+                    : "text-zinc-600"
+              }`}
+            >
+              {stepCompleted ? (
+                <span
+                  aria-hidden="true"
+                  className="flex size-4 shrink-0 items-center justify-center rounded-full bg-emerald-950 text-[10px]"
+                >
+                  ✓
+                </span>
+              ) : active ? (
+                <span
+                  aria-hidden="true"
+                  className="size-4 shrink-0 animate-pulse rounded-full border border-zinc-400 bg-zinc-600/50 motion-reduce:animate-none"
+                />
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className="size-4 shrink-0 rounded-full border border-zinc-800"
+                />
+              )}
+              <span>
+                <span className="sr-only">
+                  {stepCompleted
+                    ? "Completed: "
+                    : active
+                      ? "Current: "
+                      : "Upcoming: "}
+                </span>
+                {step.label}
+              </span>
+            </li>
+          );
+        })}
+        <li
+          className={`flex items-center gap-2 text-xs ${
+            completed
+              ? "text-emerald-300"
+              : failed
+                ? "text-red-300"
+                : "text-zinc-600"
+          }`}
+        >
+          <span
+            aria-hidden="true"
+            className={`flex size-4 shrink-0 items-center justify-center rounded-full text-[10px] ${
+              completed
+                ? "bg-emerald-950"
+                : failed
+                  ? "bg-red-950"
+                  : "border border-zinc-800"
+            }`}
+          >
+            {completed ? "✓" : failed ? "×" : ""}
+          </span>
+          <span>
+            <span className="sr-only">
+              {completed ? "Completed: " : failed ? "Failed: " : "Upcoming: "}
+            </span>
+            {failed ? "Investigation failed" : "Investigation completed"}
+          </span>
+        </li>
+      </ol>
+      {completed || failed ? (
+        <p aria-live="polite" className="text-sm text-zinc-300">
+          {progressMessage}
+        </p>
+      ) : (
+        <span className="text-sm text-zinc-300">
+          <AsyncActivity label={progressMessage} />
+        </span>
+      )}
+      {disconnected && (
+        <p className="text-xs text-amber-500/80">
+          Live progress disconnected. The investigation is still running.
+        </p>
       )}
     </div>
   );
@@ -853,7 +1009,9 @@ function AgentRunResultView({
             </a>
           </div>
         ) : githubIssueStatus === "creating" || isCreatingIssue ? (
-          <p className="text-sm text-zinc-300">Creating GitHub issue…</p>
+          <p className="text-sm text-zinc-300">
+            <AsyncActivity label="Creating GitHub issue…" />
+          </p>
         ) : (
           <button
             type="button"

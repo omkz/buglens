@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { API_BASE_URL } from "@/lib/config";
+import { AsyncActivity } from "../../../_components/async-activity";
 import type { Investigation } from "../../../investigations/_components/types";
 import type { Project } from "../../_components/types";
 
@@ -185,7 +186,11 @@ export default function ReportBugPage() {
                 disabled={isSubmitting || !title.trim()}
                 className="rounded-full bg-zinc-50 px-4 py-2 text-sm font-medium text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isSubmitting ? "Creating…" : "Create Investigation"}
+                {isSubmitting ? (
+                  <AsyncActivity label="Creating investigation…" />
+                ) : (
+                  "Create Investigation"
+                )}
               </button>
             </div>
           </form>
