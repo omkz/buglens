@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 from google import genai
 from google.genai import types
+from pydantic import ValidationError
 
 from .analyzer import (
     AnalysisInput,
@@ -18,6 +19,8 @@ from .analyzer import (
 )
 
 logger = structlog.get_logger(__name__)
+
+_MAX_VALIDATION_DIAGNOSTICS = 10
 
 _SYSTEM_INSTRUCTION = """You are Buglensa's bug evidence analyzer.
 
@@ -95,26 +98,42 @@ class GeminiBugAnalyzer:
                     )
                 recording_parts.append(part)
 
-            response = await async_client.models.generate_content(
-                model=self.model_name,
-                contents=[*recording_parts, _build_prompt(analysis_input)],
-                config=types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_INSTRUCTION,
-                    response_mime_type="application/json",
-                    response_schema=BugAnalysis,
-                ),
-            )
+            try:
+                async with asyncio.timeout(self.processing_timeout_seconds):
+                    response = await async_client.models.generate_content(
+                        model=self.model_name,
+                        contents=[*recording_parts, _build_prompt(analysis_input)],
+                        config=types.GenerateContentConfig(
+                            system_instruction=_SYSTEM_INSTRUCTION,
+                            response_mime_type="application/json",
+                            response_schema=BugAnalysis,
+                        ),
+                    )
+            except TimeoutError as exc:
+                raise AnalyzerProviderError(kind="timeout") from exc
             if isinstance(response.parsed, BugAnalysis):
                 return response.parsed
             if response.parsed is not None:
-                return BugAnalysis.model_validate(response.parsed)
-            if not response.text:
-                raise AnalyzerProviderError("Gemini returned no analysis.")
-            return BugAnalysis.model_validate_json(response.text)
+                try:
+                    return BugAnalysis.model_validate(response.parsed)
+                except ValidationError as exc:
+                    raise AnalyzerProviderError(
+                        kind="invalid_structured_result",
+                        **_validation_diagnostics(exc),
+                    ) from exc
+            if not isinstance(response.text, str) or not response.text.strip():
+                raise AnalyzerProviderError(kind="no_structured_result")
+            try:
+                return BugAnalysis.model_validate_json(response.text)
+            except ValidationError as exc:
+                raise AnalyzerProviderError(
+                    kind="invalid_structured_result",
+                    **_validation_diagnostics(exc),
+                ) from exc
         except (AnalyzerConfigurationError, AnalyzerProviderError):
             raise
         except Exception as exc:
-            raise AnalyzerProviderError("Gemini analysis failed.") from exc
+            raise AnalyzerProviderError(kind="provider_error") from exc
         finally:
             if async_client is not None:
                 try:
@@ -126,6 +145,23 @@ class GeminiBugAnalyzer:
                     client.close()
                 except Exception:
                     logger.warning("gemini_client_cleanup_failed")
+
+
+def _validation_diagnostics(exc: ValidationError) -> dict[str, object]:
+    errors = exc.errors(
+        include_url=False,
+        include_context=False,
+        include_input=False,
+    )
+    retained = errors[:_MAX_VALIDATION_DIAGNOSTICS]
+    return {
+        "validation_error_count": len(errors),
+        "validation_error_types": tuple(error["type"] for error in retained),
+        "validation_error_locations": tuple(
+            tuple(item for item in error["loc"] if isinstance(item, (str, int)))
+            for error in retained
+        ),
+    }
 
 
 def _build_prompt(analysis_input: AnalysisInput) -> str:

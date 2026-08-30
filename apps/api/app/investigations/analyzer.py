@@ -77,8 +77,30 @@ class AnalyzerConfigurationError(RuntimeError):
     """Raised when analysis cannot run because backend configuration is absent."""
 
 
+AnalyzerProviderFailureKind = Literal[
+    "timeout",
+    "provider_error",
+    "no_structured_result",
+    "invalid_structured_result",
+]
+
+
 class AnalyzerProviderError(RuntimeError):
-    """Raised for safe, provider-facing analysis failures."""
+    """Raised with trusted diagnostics for provider-facing analysis failures."""
+
+    def __init__(
+        self,
+        *,
+        kind: AnalyzerProviderFailureKind,
+        validation_error_count: int | None = None,
+        validation_error_types: tuple[str, ...] = (),
+        validation_error_locations: tuple[tuple[str | int, ...], ...] = (),
+    ):
+        self.kind = kind
+        self.validation_error_count = validation_error_count
+        self.validation_error_types = validation_error_types
+        self.validation_error_locations = validation_error_locations
+        super().__init__("Bug analysis provider failed.")
 
 
 class AnalyzerEvidenceError(RuntimeError):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from base64 import b64encode
@@ -254,7 +255,7 @@ def test_description_only_analysis_is_scoped_and_persists_result(monkeypatch):
     ("failure", "expected_status", "expected_detail"),
     [
         (
-            AnalyzerProviderError("raw provider secret"),
+            AnalyzerProviderError(kind="provider_error"),
             502,
             "Bug analysis failed. Please try again.",
         ),
@@ -294,6 +295,65 @@ def test_analysis_failure_is_safe_and_marks_investigation_failed(
     assert response.json() == {"detail": expected_detail}
     assert str(failure) not in response.text
     assert failed_ids == [investigation.id]
+
+
+def test_analysis_provider_route_logs_only_safe_failure_diagnostics(monkeypatch):
+    provider_error = AnalyzerProviderError(
+        kind="invalid_structured_result",
+        validation_error_count=1,
+        validation_error_types=("missing",),
+        validation_error_locations=(("observed_behavior",),),
+    )
+    provider_error.__cause__ = RuntimeError("raw provider response content")
+    service = FakeService(provider_error)
+    client, app, routes, _connection_value = _connected_client(monkeypatch, service)
+    investigation = _investigation()
+    failed_ids = []
+    warnings = []
+
+    class CapturingLogger:
+        def warning(self, event, **kwargs):
+            warnings.append((event, kwargs))
+
+    async def claim(*args, **kwargs):
+        return AnalysisClaim(
+            state=AnalysisClaimState.READY,
+            investigation=investigation,
+            evidence=[],
+        )
+
+    async def mark_failed(db, *, investigation_id):
+        failed_ids.append(investigation_id)
+
+    monkeypatch.setattr(routes, "claim_analysis", claim)
+    monkeypatch.setattr(routes, "mark_analysis_failed", mark_failed)
+    monkeypatch.setattr(routes, "logger", CapturingLogger())
+    try:
+        response = client.post(f"/api/investigations/{investigation.id}/analyze")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "Bug analysis failed. Please try again."
+    }
+    assert failed_ids == [investigation.id]
+    assert warnings == [
+        (
+            "analysis_provider_failed",
+            {
+                "investigation_id": str(investigation.id),
+                "failure_kind": "invalid_structured_result",
+                "exception_type": "AnalyzerProviderError",
+                "exc_info": True,
+                "safe_exc_info": True,
+                "validation_error_count": 1,
+                "validation_error_types": ("missing",),
+                "validation_error_locations": (("observed_behavior",),),
+            },
+        )
+    ]
+    assert "raw provider response content" not in repr(warnings)
 
 
 def test_recording_resolution_failure_returns_safe_503_and_marks_failed(
@@ -482,7 +542,7 @@ async def test_analysis_service_preserves_analyzer_provider_errors(tmp_path: Pat
     recording_path = tmp_path / recording.storage_key
     recording_path.parent.mkdir(parents=True)
     recording_path.write_bytes(b"video-data")
-    provider_error = AnalyzerProviderError("provider failed")
+    provider_error = AnalyzerProviderError(kind="provider_error")
 
     class ProviderFailingAnalyzer:
         model_name = "fake"
@@ -509,6 +569,8 @@ class FakeGeminiModels:
         self.calls.append(kwargs)
         if isinstance(self.result, Exception):
             raise self.result
+        if hasattr(self.result, "parsed") and hasattr(self.result, "text"):
+            return self.result
         return SimpleNamespace(parsed=self.result, text=None)
 
 
@@ -670,7 +732,7 @@ async def test_gemini_clients_are_closed_after_provider_failure(tmp_path):
         client_factory=lambda _project, _location: fake_client,
     )
 
-    with pytest.raises(AnalyzerProviderError):
+    with pytest.raises(AnalyzerProviderError) as exc_info:
         await analyzer.analyze(
             AnalysisInput(
                 title="Checkout bug",
@@ -685,8 +747,117 @@ async def test_gemini_clients_are_closed_after_provider_failure(tmp_path):
             )
         )
 
+    assert exc_info.value.kind == "provider_error"
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value) == "Bug analysis provider failed."
+    assert "raw Gemini response" not in str(exc_info.value)
     assert fake_client.aio.closed is True
     assert fake_client.closed is True
+
+
+@pytest.mark.anyio
+async def test_gemini_processing_timeout_is_enforced_and_cancels_request():
+    fake_client = FakeGeminiClient(_analysis())
+    cancelled = False
+
+    async def generate_content(**kwargs):
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled = True
+
+    fake_client.aio.models.generate_content = generate_content
+    analyzer = GeminiBugAnalyzer(
+        project="orbital-wharf-427808-p5",
+        location="global",
+        model_name="gemini-test-model",
+        processing_timeout_seconds=0.01,
+        client_factory=lambda _project, _location: fake_client,
+    )
+
+    with pytest.raises(AnalyzerProviderError) as exc_info:
+        await analyzer.analyze(
+            AnalysisInput(
+                title="Checkout bug", description=None, logs=[], recordings=[]
+            )
+        )
+
+    assert exc_info.value.kind == "timeout"
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+    assert cancelled is True
+    assert fake_client.aio.closed is True
+    assert fake_client.closed is True
+
+
+@pytest.mark.anyio
+async def test_gemini_empty_response_is_classified_safely():
+    fake_client = FakeGeminiClient(SimpleNamespace(parsed=None, text="  "))
+    analyzer = GeminiBugAnalyzer(
+        project="orbital-wharf-427808-p5",
+        location="global",
+        model_name="gemini-test-model",
+        processing_timeout_seconds=1,
+        client_factory=lambda _project, _location: fake_client,
+    )
+
+    with pytest.raises(AnalyzerProviderError) as exc_info:
+        await analyzer.analyze(
+            AnalysisInput(
+                title="Checkout bug", description=None, logs=[], recordings=[]
+            )
+        )
+
+    assert exc_info.value.kind == "no_structured_result"
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "response",
+    [
+        SimpleNamespace(
+            parsed={"summary": "raw-invalid-model-value"},
+            text=None,
+        ),
+        SimpleNamespace(parsed=None, text='{\"summary\": "raw-invalid-model-value"'),
+    ],
+)
+async def test_gemini_invalid_structured_result_has_safe_diagnostics(response):
+    fake_client = FakeGeminiClient(response)
+    analyzer = GeminiBugAnalyzer(
+        project="orbital-wharf-427808-p5",
+        location="global",
+        model_name="gemini-test-model",
+        processing_timeout_seconds=1,
+        client_factory=lambda _project, _location: fake_client,
+    )
+
+    with pytest.raises(AnalyzerProviderError) as exc_info:
+        await analyzer.analyze(
+            AnalysisInput(
+                title="Checkout bug", description=None, logs=[], recordings=[]
+            )
+        )
+
+    error = exc_info.value
+    assert error.kind == "invalid_structured_result"
+    assert error.validation_error_count is not None
+    assert error.validation_error_count >= 1
+    assert len(error.validation_error_types) <= 10
+    assert len(error.validation_error_locations) <= 10
+    assert all(isinstance(value, str) for value in error.validation_error_types)
+    assert all(
+        all(isinstance(item, (str, int)) for item in location)
+        for location in error.validation_error_locations
+    )
+    assert "raw-invalid-model-value" not in repr(error.__dict__)
+    assert set(error.__dict__) == {
+        "kind",
+        "validation_error_count",
+        "validation_error_types",
+        "validation_error_locations",
+    }
 
 
 @pytest.mark.anyio

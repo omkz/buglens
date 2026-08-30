@@ -680,10 +680,21 @@ async def analyze_investigation(
         ) from None
     except AnalyzerProviderError as exc:
         await _best_effort_mark_analysis_failed(db, investigation_id)
+        validation_fields = {}
+        if exc.validation_error_count is not None:
+            validation_fields = {
+                "validation_error_count": exc.validation_error_count,
+                "validation_error_types": exc.validation_error_types,
+                "validation_error_locations": exc.validation_error_locations,
+            }
         logger.warning(
             "analysis_provider_failed",
             investigation_id=str(investigation_id),
+            failure_kind=exc.kind,
             exception_type=type(exc).__name__,
+            exc_info=True,
+            safe_exc_info=True,
+            **validation_fields,
         )
         raise HTTPException(
             status_code=502,
