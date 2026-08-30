@@ -811,6 +811,13 @@ async def run_agent_investigation(
         await _best_effort_mark_agent_run_failed(
             db, investigation_id, payload.attempt_id
         )
+        validation_fields = {}
+        if exc.validation_error_count is not None:
+            validation_fields = {
+                "validation_error_count": exc.validation_error_count,
+                "validation_error_types": exc.validation_error_types,
+                "validation_error_locations": exc.validation_error_locations,
+            }
         logger.warning(
             "agent_run_provider_failed",
             investigation_id=str(investigation_id),
@@ -818,6 +825,7 @@ async def run_agent_investigation(
             exception_type=type(exc).__name__,
             exc_info=True,
             safe_exc_info=True,
+            **validation_fields,
         )
         raise HTTPException(
             status_code=502,

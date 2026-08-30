@@ -2,8 +2,10 @@ import json
 import logging
 
 import structlog
+from pydantic import ValidationError
 
 from app.investigation_agent.agent import AgentProviderError
+from app.investigation_agent.schemas import AgentInvestigationResult
 from app.logging import configure_logging
 
 
@@ -199,28 +201,46 @@ def test_provider_failure_log_keeps_safe_metadata_and_sanitizes_exception_chain(
 
     try:
         try:
-            raise RuntimeError("provider diagnostic payload")
-        except RuntimeError as exc:
-            raise AgentProviderError(kind="adk_runtime_error") from exc
+            AgentInvestigationResult.model_validate(
+                {
+                    "repository_findings": "raw-invalid-model-value",
+                    "duplicate_candidates": [],
+                    "reproduction_plan": None,
+                    "cannot_reproduce_reason": "No plan available.",
+                }
+            )
+        except ValidationError as exc:
+            raise AgentProviderError(
+                kind="invalid_structured_result",
+                validation_error_count=1,
+                validation_error_types=("list_type",),
+                validation_error_locations=(("repository_findings",),),
+            ) from exc
     except AgentProviderError:
         logger.warning(
             "agent_run_provider_failed",
             investigation_id="inv_456",
-            failure_kind="adk_runtime_error",
+            failure_kind="invalid_structured_result",
             exception_type="AgentProviderError",
             exc_info=True,
             safe_exc_info=True,
+            validation_error_count=1,
+            validation_error_types=("list_type",),
+            validation_error_locations=(("repository_findings",),),
         )
 
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["event"] == "agent_run_provider_failed"
     assert payload["investigation_id"] == "inv_456"
-    assert payload["failure_kind"] == "adk_runtime_error"
+    assert payload["failure_kind"] == "invalid_structured_result"
     assert payload["exception_type"] == "AgentProviderError"
-    assert "RuntimeError" in payload["exception"]
+    assert payload["validation_error_count"] == 1
+    assert payload["validation_error_types"] == ["list_type"]
+    assert payload["validation_error_locations"] == [["repository_findings"]]
+    assert "ValidationError" in payload["exception"]
     assert "AgentProviderError" in payload["exception"]
     assert "direct cause" in payload["exception"]
-    assert "provider diagnostic payload" not in payload["exception"]
+    assert "raw-invalid-model-value" not in payload["exception"]
     assert "safe_exc_info" not in payload
 
 

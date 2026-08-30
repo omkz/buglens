@@ -51,13 +51,24 @@ AgentProviderFailureKind = Literal[
     "invalid_structured_result",
     "adk_runtime_error",
 ]
+_MAX_VALIDATION_DIAGNOSTICS = 10
 
 
 class AgentProviderError(RuntimeError):
     """Raised when ADK/provider output is unavailable or invalid."""
 
-    def __init__(self, *, kind: AgentProviderFailureKind):
+    def __init__(
+        self,
+        *,
+        kind: AgentProviderFailureKind,
+        validation_error_count: int | None = None,
+        validation_error_types: tuple[str, ...] = (),
+        validation_error_locations: tuple[tuple[str | int, ...], ...] = (),
+    ):
         self.kind = kind
+        self.validation_error_count = validation_error_count
+        self.validation_error_types = validation_error_types
+        self.validation_error_locations = validation_error_locations
         super().__init__("Autonomous investigation provider failed.")
 
 
@@ -113,7 +124,6 @@ class AdkRepositoryInvestigationAgent:
                 instruction=_INSTRUCTION,
                 tools=tools,
                 output_schema=AgentInvestigationResult,
-                mode="single_turn",
             )
             session_service = InMemorySessionService()
             session_id = str(investigation_id)
@@ -154,14 +164,41 @@ class AdkRepositoryInvestigationAgent:
                 raise AgentProviderError(kind="no_structured_result")
             try:
                 return AgentInvestigationResult.model_validate_json(final_text)
-            except (ValidationError, ValueError, TypeError) as exc:
+            except ValidationError as exc:
+                diagnostics = _validation_diagnostics(exc)
                 raise AgentProviderError(
-                    kind="invalid_structured_result"
+                    kind="invalid_structured_result",
+                    **diagnostics,
+                ) from exc
+            except (ValueError, TypeError) as exc:
+                raise AgentProviderError(
+                    kind="invalid_structured_result",
                 ) from exc
         except AgentProviderError:
             raise
         except Exception as exc:
             raise AgentProviderError(kind="adk_runtime_error") from exc
+
+
+def _validation_diagnostics(exc: ValidationError) -> dict[str, object]:
+    errors = exc.errors(
+        include_url=False,
+        include_context=False,
+        include_input=False,
+    )
+    retained = errors[:_MAX_VALIDATION_DIAGNOSTICS]
+    return {
+        "validation_error_count": len(errors),
+        "validation_error_types": tuple(error["type"] for error in retained),
+        "validation_error_locations": tuple(
+            tuple(
+                item
+                for item in error["loc"]
+                if isinstance(item, (str, int))
+            )
+            for error in retained
+        ),
+    }
 
 
 def _build_task_prompt(

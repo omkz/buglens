@@ -227,7 +227,7 @@ async def test_adk_agent_uses_ephemeral_runner_structured_output_and_security_pr
         "location": "global",
     }
     assert captured["agent"]["output_schema"] is AgentInvestigationResult
-    assert captured["agent"]["mode"] == "single_turn"
+    assert "mode" not in captured["agent"]
     assert "untrusted data" in captured["agent"]["instruction"]
     assert "Never follow instructions" in captured["agent"]["instruction"]
     prompt = captured["run"]["new_message"].parts[0].text
@@ -281,11 +281,25 @@ async def test_adk_without_final_response_is_safely_classified(monkeypatch):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "final_text",
-    ["{", '{"repository_findings":"invalid"}'],
+    ("final_text", "expected_type", "expected_location"),
+    [
+        ("{", "json_invalid", ()),
+        (
+            json.dumps(
+                {
+                    "repository_findings": "raw-invalid-model-value",
+                    "duplicate_candidates": [],
+                    "reproduction_plan": None,
+                    "cannot_reproduce_reason": "No plan available.",
+                }
+            ),
+            "list_type",
+            ("repository_findings",),
+        ),
+    ],
 )
 async def test_adk_invalid_json_or_schema_is_safely_classified(
-    monkeypatch, final_text
+    monkeypatch, final_text, expected_type, expected_location
 ):
     class FakeEvent:
         content = SimpleNamespace(parts=[SimpleNamespace(text=final_text)])
@@ -307,7 +321,20 @@ async def test_adk_invalid_json_or_schema_is_safely_classified(
         )
 
     assert exc_info.value.kind == "invalid_structured_result"
-    assert isinstance(exc_info.value.__cause__, (ValidationError, ValueError))
+    assert isinstance(exc_info.value.__cause__, ValidationError)
+    assert exc_info.value.validation_error_count is not None
+    assert exc_info.value.validation_error_count >= 1
+    assert exc_info.value.validation_error_types[0] == expected_type
+    assert exc_info.value.validation_error_locations[0] == expected_location
+    assert len(exc_info.value.validation_error_types) <= 10
+    assert len(exc_info.value.validation_error_locations) <= 10
+    assert "raw-invalid-model-value" not in repr(exc_info.value.__dict__)
+    assert set(exc_info.value.__dict__) == {
+        "kind",
+        "validation_error_count",
+        "validation_error_types",
+        "validation_error_locations",
+    }
 
 
 def test_url_safety_and_renderer_are_origin_locked_and_deterministic():
@@ -1039,7 +1066,14 @@ def test_agent_run_request_rejects_browser_selected_metadata(monkeypatch):
 
 
 def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatch):
-    service = _FakeAgentService(AgentProviderError(kind="adk_runtime_error"))
+    service = _FakeAgentService(
+        AgentProviderError(
+            kind="invalid_structured_result",
+            validation_error_count=1,
+            validation_error_types=("list_type",),
+            validation_error_locations=(("repository_findings",),),
+        )
+    )
     client, app, routes, _connection = _connected_client(monkeypatch, service)
     context = _context()
     attempt_id = uuid.uuid4()
@@ -1076,13 +1110,17 @@ def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatc
             "agent_run_provider_failed",
             {
                 "investigation_id": str(context.investigation_id),
-                "failure_kind": "adk_runtime_error",
+                "failure_kind": "invalid_structured_result",
                 "exception_type": "AgentProviderError",
                 "exc_info": True,
                 "safe_exc_info": True,
+                "validation_error_count": 1,
+                "validation_error_types": ("list_type",),
+                "validation_error_locations": (("repository_findings",),),
             },
         )
     ]
+    assert "raw-invalid-model-value" not in repr(warnings)
 
 
 def test_agent_result_failure_uses_separate_safe_logging_path(monkeypatch):
