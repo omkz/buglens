@@ -971,6 +971,8 @@ function AgentRunResultView({
         ))}
       </ResultList>
 
+      <ProposedFix proposal={result.fix_proposal} />
+
       <ResultList title="Possible duplicate issues" empty="No plausible duplicates found.">
         {result.duplicate_candidates.map((candidate) => (
           <li key={candidate.issue_number} className="space-y-1">
@@ -1075,6 +1077,67 @@ function AgentRunResultView({
       </div>
     </div>
   );
+}
+
+function ProposedFix({ proposal }: { proposal: AgentRunResult["fix_proposal"] }) {
+  if (proposal.status === "not_proposed") {
+    return (
+      <div className="flex flex-col gap-2 border-t border-zinc-800 pt-6">
+        <h3 className="text-sm font-medium text-zinc-200">Proposed fix</h3>
+        <p className="text-sm leading-6 text-zinc-500">
+          Buglensa could not confidently propose a safe fix.
+          {proposal.reason ? ` ${proposal.reason}` : ""}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4 border-t border-zinc-800 pt-6">
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium text-zinc-200">Proposed fix</h3>
+        <p className="text-sm leading-6 text-zinc-400">{proposal.summary}</p>
+      </div>
+      {proposal.files.map((file) => (
+        <div
+          key={file.path}
+          className="overflow-hidden rounded-md border border-zinc-800 bg-zinc-950"
+        >
+          <div className="border-b border-zinc-800 px-4 py-3">
+            <code className="text-sm text-zinc-200">{file.path}</code>
+            <p className="mt-1 text-xs leading-5 text-zinc-500">
+              {file.explanation}
+            </p>
+          </div>
+          <pre
+            aria-label={`Proposed changes for ${file.path}`}
+            className="max-h-[32rem] overflow-auto p-4 text-xs leading-5"
+          >
+            <code>
+              {file.diff.split("\n").map((line, index) => (
+                <span
+                  key={`${index}-${line}`}
+                  className={`block min-w-max ${diffLineClass(line)}`}
+                >
+                  {line || " "}
+                </span>
+              ))}
+            </code>
+          </pre>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function diffLineClass(line: string) {
+  if (line.startsWith("@@")) return "text-sky-400";
+  if (line.startsWith("+++") || line.startsWith("---")) {
+    return "text-zinc-500";
+  }
+  if (line.startsWith("+")) return "bg-emerald-950/40 text-emerald-300";
+  if (line.startsWith("-")) return "bg-red-950/40 text-red-300";
+  return "text-zinc-500";
 }
 
 function ResultList({

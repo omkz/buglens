@@ -65,6 +65,8 @@ class PersistedAgentRun:
     progress_message: str | None = None
     progress_updated_at: datetime | None = None
     run_attempt_id: uuid.UUID | None = None
+    fix_proposal: dict | None = None
+    fix_proposal_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,8 @@ async def claim_agent_run(
             agent_model=agent_model,
             repository_summary=None,
             duplicate_candidates=[],
+            fix_proposal=None,
+            fix_proposal_reason=None,
             reproduction_plan=None,
             generated_test=None,
             reproduction_status=None,
@@ -196,6 +200,8 @@ async def claim_agent_run(
         run.agent_model = agent_model
         run.repository_summary = None
         run.duplicate_candidates = []
+        run.fix_proposal = None
+        run.fix_proposal_reason = None
         run.reproduction_plan = None
         run.generated_test = None
         run.reproduction_status = None
@@ -257,6 +263,12 @@ async def complete_agent_run(
     run.duplicate_candidates = [
         candidate.model_dump(mode="json") for candidate in result.duplicate_candidates
     ]
+    run.fix_proposal = (
+        result.fix_proposal.model_dump(mode="json")
+        if result.fix_proposal is not None
+        else None
+    )
+    run.fix_proposal_reason = result.cannot_propose_fix_reason
     run.reproduction_plan = (
         result.reproduction_plan.model_dump(mode="json")
         if result.reproduction_plan is not None
@@ -506,6 +518,8 @@ def _to_persisted(run: models.InvestigationAgentRun) -> PersistedAgentRun:
         agent_model=run.agent_model,
         repository_summary=run.repository_summary,
         duplicate_candidates=run.duplicate_candidates,
+        fix_proposal=run.fix_proposal,
+        fix_proposal_reason=run.fix_proposal_reason,
         reproduction_plan=run.reproduction_plan,
         generated_test=run.generated_test,
         reproduction_status=run.reproduction_status,

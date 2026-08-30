@@ -54,6 +54,7 @@ class GitHubToolContext:
         self._bytes_read = 0
         self._files_read = 0
         self.read_paths: set[str] = set()
+        self.read_files: dict[str, str] = {}
         self.returned_issues: dict[int, github_client.GitHubIssue] = {}
         self.had_github_failure = False
 
@@ -198,6 +199,7 @@ class GitHubToolContext:
         self._files_read += 1
         self._bytes_read += len(raw)
         self.read_paths.add(path)
+        self.read_files[path] = text
         return {
             "ok": True,
             "notice": _UNTRUSTED_NOTICE,

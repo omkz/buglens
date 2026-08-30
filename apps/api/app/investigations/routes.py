@@ -44,6 +44,7 @@ from app.investigation_agent.github_issue import (
     GitHubIssuePublisher,
     build_github_issue,
 )
+from app.investigation_agent.fixes import render_unified_diff
 from app.investigation_agent.repository import (
     AgentRunClaimState,
     GitHubIssueClaimState,
@@ -62,6 +63,7 @@ from app.investigation_agent.schemas import (
     BrowserExecutionResult,
     BrowserTestPlan,
     DuplicateCandidate,
+    FixProposal,
     RepositoryFinding,
 )
 from app.investigation_agent.service import (
@@ -159,6 +161,19 @@ class AnalysisStatusResponse(BaseModel):
     analysis: BugAnalysis | None
 
 
+class ProposedFileChangeResponse(BaseModel):
+    path: str
+    explanation: str
+    diff: str
+
+
+class FixProposalResponse(BaseModel):
+    status: Literal["proposed", "not_proposed"]
+    summary: str | None
+    files: list[ProposedFileChangeResponse]
+    reason: str | None
+
+
 class AgentRunResultResponse(BaseModel):
     repository_findings: list[RepositoryFinding]
     duplicate_candidates: list[DuplicateCandidate]
@@ -167,6 +182,7 @@ class AgentRunResultResponse(BaseModel):
     reproduction_status: models.ReproductionStatus | None
     execution: BrowserExecutionResult | None
     execution_summary: str | None
+    fix_proposal: FixProposalResponse
 
 
 class GitHubIssueResponse(BaseModel):
@@ -1077,6 +1093,11 @@ def _agent_run_response(
         )
     result = None
     if run.status == models.AgentRunStatus.COMPLETED.value:
+        persisted_fix = (
+            FixProposal.model_validate(run.fix_proposal)
+            if run.fix_proposal is not None
+            else None
+        )
         result = AgentRunResultResponse(
             repository_findings=[
                 RepositoryFinding.model_validate(item)
@@ -1103,6 +1124,28 @@ def _agent_run_response(
                 else None
             ),
             execution_summary=run.execution_summary,
+            fix_proposal=(
+                FixProposalResponse(
+                    status="proposed",
+                    summary=persisted_fix.summary,
+                    files=[
+                        ProposedFileChangeResponse(
+                            path=change.path,
+                            explanation=change.explanation,
+                            diff=render_unified_diff(change),
+                        )
+                        for change in persisted_fix.files
+                    ],
+                    reason=None,
+                )
+                if persisted_fix is not None
+                else FixProposalResponse(
+                    status="not_proposed",
+                    summary=None,
+                    files=[],
+                    reason=run.fix_proposal_reason,
+                )
+            ),
         )
     return AgentRunStatusResponse(
         investigation_id=investigation_id,

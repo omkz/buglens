@@ -12,6 +12,7 @@ from app.integrations.github import client as github_client
 from app.integrations.github.access import create_scoped_installation_token
 
 from .agent import AgentConfigurationError, RepositoryInvestigationAgent
+from .fixes import MAX_FIX_CONTENT_BYTES, is_forbidden_fix_path
 from .repository import AgentRunContext
 from .schemas import AgentInvestigationResult, BrowserExecutionResult
 from .tools.github import GitHubToolContext
@@ -151,3 +152,22 @@ def _validate_agent_result(
             raise InvestigationResultError(
                 "Agent cited an issue that was not returned by the scoped search."
             )
+    if result.fix_proposal is None:
+        return
+    for change in result.fix_proposal.files:
+        if is_forbidden_fix_path(change.path):
+            raise InvestigationResultError("Agent proposed an unsafe repository path.")
+        if change.path not in github_tools.known_paths:
+            raise InvestigationResultError("Agent proposed a nonexistent repository file.")
+        original = github_tools.read_files.get(change.path)
+        if original is None:
+            raise InvestigationResultError("Agent proposed a file it did not read.")
+        if change.original_content != original:
+            raise InvestigationResultError(
+                "Agent proposal did not match the retrieved repository file."
+            )
+        if (
+            len(change.original_content.encode("utf-8")) > MAX_FIX_CONTENT_BYTES
+            or len(change.updated_content.encode("utf-8")) > MAX_FIX_CONTENT_BYTES
+        ):
+            raise InvestigationResultError("Agent proposal content is too large.")

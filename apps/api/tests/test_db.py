@@ -426,6 +426,7 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     assert "f8d9e0a1b2c3" in revisions  # add GitHub issue publication
     assert "a9e0f1b2c3d4" in revisions  # add persisted AgentRun progress
     assert "b0f1c2d3e4f5" in revisions  # scope progress to one run attempt
+    assert "c1d2e3f4a5b6" in revisions  # persist structured fix proposals
 
 
 def test_agent_run_progress_schema_and_migration_are_constrained_and_reversible():
@@ -468,6 +469,26 @@ def test_agent_run_attempt_id_schema_and_migration_are_uuid_and_reversible():
     assert revision.down_revision == "a9e0f1b2c3d4"
     assert 'sa.Column("run_attempt_id", sa.Uuid(), nullable=True)' in source
     assert 'op.drop_column("investigation_agent_runs", "run_attempt_id")' in source
+
+
+def test_agent_run_fix_proposal_schema_and_migration_are_reversible():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    table = Base.metadata.tables["investigation_agent_runs"]
+    assert isinstance(table.c.fix_proposal.type, JSONB)
+    assert table.c.fix_proposal.nullable
+    assert isinstance(table.c.fix_proposal_reason.type, Text)
+    assert table.c.fix_proposal_reason.nullable
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("c1d2e3f4a5b6")
+    source = Path(revision.path).read_text()
+    assert revision.down_revision == "b0f1c2d3e4f5"
+    assert 'sa.Column("fix_proposal", postgresql.JSONB(), nullable=True)' in source
+    assert 'sa.Column("fix_proposal_reason", sa.Text(), nullable=True)' in source
+    assert 'op.drop_column("investigation_agent_runs", "fix_proposal")' in source
 
 
 def test_projects_migration_is_linear_and_supports_clean_downgrade():

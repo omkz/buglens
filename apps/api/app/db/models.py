@@ -338,6 +338,8 @@ class InvestigationAgentRun(Base):
     agent_model: Mapped[str]
     repository_summary: Mapped[list[dict] | None] = mapped_column(JSONB)
     duplicate_candidates: Mapped[list[dict]] = mapped_column(JSONB)
+    fix_proposal: Mapped[dict | None] = mapped_column(JSONB)
+    fix_proposal_reason: Mapped[str | None] = mapped_column(Text)
     reproduction_plan: Mapped[dict | None] = mapped_column(JSONB)
     generated_test: Mapped[str | None] = mapped_column(Text)
     reproduction_status: Mapped[str | None]

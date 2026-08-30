@@ -86,6 +86,16 @@ export type AgentRunResult = {
     summary: string;
   } | null;
   execution_summary: string | null;
+  fix_proposal: {
+    status: "proposed" | "not_proposed";
+    summary: string | null;
+    files: Array<{
+      path: string;
+      explanation: string;
+      diff: string;
+    }>;
+    reason: string | null;
+  };
 };
 
 export type AgentRunStatus = {
