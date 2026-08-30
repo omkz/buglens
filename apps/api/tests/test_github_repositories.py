@@ -305,7 +305,10 @@ def test_repositories_use_persisted_installation_and_keep_credentials_ephemeral(
     monkeypatch.setattr(routes, "logger", test_logger)
 
     settings = get_settings().model_copy(
-        update={"github_private_key": private_key}
+        update={
+            "github_private_key": private_key,
+            "github_private_key_path": "",
+        }
     )
     app.dependency_overrides[get_settings] = lambda: settings
     try:
