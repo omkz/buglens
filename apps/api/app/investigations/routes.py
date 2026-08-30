@@ -817,6 +817,7 @@ async def run_agent_investigation(
             failure_kind=exc.kind,
             exception_type=type(exc).__name__,
             exc_info=True,
+            safe_exc_info=True,
         )
         raise HTTPException(
             status_code=502,
@@ -831,6 +832,7 @@ async def run_agent_investigation(
             investigation_id=str(investigation_id),
             exception_type=type(exc).__name__,
             exc_info=True,
+            safe_exc_info=True,
         )
         raise HTTPException(
             status_code=502,

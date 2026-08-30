@@ -1079,6 +1079,7 @@ def test_agent_provider_failure_is_safe_marks_failed_and_allows_retry(monkeypatc
                 "failure_kind": "adk_runtime_error",
                 "exception_type": "AgentProviderError",
                 "exc_info": True,
+                "safe_exc_info": True,
             },
         )
     ]
@@ -1126,6 +1127,7 @@ def test_agent_result_failure_uses_separate_safe_logging_path(monkeypatch):
                 "investigation_id": str(context.investigation_id),
                 "exception_type": "InvestigationResultError",
                 "exc_info": True,
+                "safe_exc_info": True,
             },
         )
     ]

@@ -209,6 +209,7 @@ def test_provider_failure_log_keeps_safe_metadata_and_sanitizes_exception_chain(
             failure_kind="adk_runtime_error",
             exception_type="AgentProviderError",
             exc_info=True,
+            safe_exc_info=True,
         )
 
     payload = json.loads(capsys.readouterr().out.strip())
@@ -220,3 +221,20 @@ def test_provider_failure_log_keeps_safe_metadata_and_sanitizes_exception_chain(
     assert "AgentProviderError" in payload["exception"]
     assert "direct cause" in payload["exception"]
     assert "provider diagnostic payload" not in payload["exception"]
+    assert "safe_exc_info" not in payload
+
+
+def test_ordinary_exception_log_keeps_diagnostic_message(capsys):
+    configure_logging(level="INFO", log_format="json")
+    logger = structlog.get_logger("tests.ordinary_exception")
+
+    try:
+        raise RuntimeError("ordinary diagnostic message")
+    except RuntimeError:
+        logger.exception("ordinary_application_failure")
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["event"] == "ordinary_application_failure"
+    assert "RuntimeError" in payload["exception"]
+    assert "ordinary diagnostic message" in payload["exception"]
+    assert "safe_exc_info" not in payload

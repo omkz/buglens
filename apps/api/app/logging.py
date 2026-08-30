@@ -131,7 +131,18 @@ def redact_sensitive_fields(
     return event_dict
 
 
-def format_safe_exception_info(
+def format_exception_info(
+    logger: object, method_name: str, event_dict: dict[str, object]
+) -> dict[str, object]:
+    """Use normal exception formatting unless safe formatting is requested."""
+    if not event_dict.pop("safe_exc_info", False):
+        return structlog.processors.format_exc_info(
+            logger, method_name, event_dict
+        )
+    return _format_safe_exception_info(logger, method_name, event_dict)
+
+
+def _format_safe_exception_info(
     logger: object, method_name: str, event_dict: dict[str, object]
 ) -> dict[str, object]:
     """Render traceback chains without serializing exception messages.
@@ -236,7 +247,7 @@ def configure_logging(*, level: str = "INFO", log_format: str = "console") -> No
         foreign_pre_chain=shared_processors,
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            format_safe_exception_info,
+            format_exception_info,
             # Runs for every record, native or foreign, right before
             # rendering -- the single place structured fields are final.
             redact_sensitive_fields,
