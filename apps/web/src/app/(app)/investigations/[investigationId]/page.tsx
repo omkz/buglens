@@ -106,13 +106,15 @@ export default function InvestigationDetailPage() {
   const issueRequestActiveRef = useRef(false);
   const investigationRequestActiveRef = useRef(false);
   const progressSourceRef = useRef<EventSource | null>(null);
+  const latestAgentRunAttemptRef = useRef<string | null>(null);
 
   useEffect(() => {
+    latestAgentRunAttemptRef.current = null;
     return () => {
       progressSourceRef.current?.close();
       progressSourceRef.current = null;
     };
-  }, []);
+  }, [investigationId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -293,6 +295,35 @@ export default function InvestigationDetailPage() {
     }
   }
 
+  async function refreshAgentRunStatus(expectedAttemptId: string) {
+    const response = await fetch(
+      `${API_BASE_URL}/investigations/${encodeURIComponent(investigationId)}/agent-run`,
+      { credentials: "include" },
+    );
+    const body = (await response.json().catch(() => null)) as
+      | AgentRunStatus
+      | { detail?: string }
+      | null;
+    if (!response.ok || !body || !("status" in body)) {
+      throw new Error(
+        body && "detail" in body && body.detail
+          ? body.detail
+          : "Unable to load the investigation result.",
+      );
+    }
+    setState((current) => {
+      if (current.status !== "ready") return current;
+      if (
+        latestAgentRunAttemptRef.current !== expectedAttemptId ||
+        body.attempt_id !== expectedAttemptId
+      ) {
+        return current;
+      }
+      return { ...current, agentRun: body };
+    });
+    return body;
+  }
+
   async function runInvestigation() {
     if (
       state.status !== "ready" ||
@@ -307,6 +338,7 @@ export default function InvestigationDetailPage() {
 
     const encodedId = encodeURIComponent(investigationId);
     const attemptId = crypto.randomUUID();
+    latestAgentRunAttemptRef.current = attemptId;
     const progressSource = new EventSource(
       `${API_BASE_URL}/investigations/${encodedId}/agent-run/events?attempt_id=${encodeURIComponent(attemptId)}`,
       { withCredentials: true },
@@ -320,11 +352,12 @@ export default function InvestigationDetailPage() {
         >;
         if (
           progress.attempt_id !== attemptId ||
+          latestAgentRunAttemptRef.current !== attemptId ||
           typeof progress.stage !== "string" ||
           !isAgentRunProgressStage(progress.stage) ||
           typeof progress.message !== "string"
         ) {
-          return;
+          return false;
         }
         const stage = progress.stage;
         const message = progress.message;
@@ -343,23 +376,35 @@ export default function InvestigationDetailPage() {
               }
             : current,
         );
+        return true;
       } catch {
         // Ignore malformed transport data; the POST remains authoritative.
+        return false;
       }
     };
     progressSource.addEventListener("progress", receiveProgress);
     progressSource.addEventListener("complete", (event) => {
-      receiveProgress(event as MessageEvent<string>);
+      const accepted = receiveProgress(event as MessageEvent<string>);
       progressSource.close();
       if (progressSourceRef.current === progressSource) {
         progressSourceRef.current = null;
       }
+      if (accepted) {
+        void refreshAgentRunStatus(attemptId).catch(() => {
+          // The POST remains authoritative if reconciliation is unavailable.
+        });
+      }
     });
     progressSource.addEventListener("failed", (event) => {
-      receiveProgress(event as MessageEvent<string>);
+      const accepted = receiveProgress(event as MessageEvent<string>);
       progressSource.close();
       if (progressSourceRef.current === progressSource) {
         progressSourceRef.current = null;
+      }
+      if (accepted) {
+        void refreshAgentRunStatus(attemptId).catch(() => {
+          // The POST remains authoritative if reconciliation is unavailable.
+        });
       }
     });
     progressSource.onerror = () => {
@@ -392,7 +437,9 @@ export default function InvestigationDetailPage() {
         );
       }
       setState((current) =>
-        current.status === "ready"
+        current.status === "ready" &&
+        latestAgentRunAttemptRef.current === attemptId &&
+        body.attempt_id === attemptId
           ? { ...current, agentRun: body }
           : current,
       );
@@ -403,20 +450,7 @@ export default function InvestigationDetailPage() {
           : "Autonomous investigation failed. Please try again.",
       );
       try {
-        const response = await fetch(
-          `${API_BASE_URL}/investigations/${encodeURIComponent(investigationId)}/agent-run`,
-          { credentials: "include" },
-        );
-        const body = (await response.json().catch(() => null)) as
-          | AgentRunStatus
-          | null;
-        if (response.ok && body) {
-          setState((current) =>
-            current.status === "ready"
-              ? { ...current, agentRun: body }
-              : current,
-          );
-        }
+        await refreshAgentRunStatus(attemptId);
       } catch {
         // A refresh reloads the persisted run state.
       }
