@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,6 +72,42 @@ async def list_projects(
         .order_by(models.Project.created_at.desc(), models.Project.id)
     )
     return [_to_persisted_project(project) for project in result.scalars()]
+
+
+_UNSET = object()
+
+
+async def update_project(
+    db: AsyncSession,
+    *,
+    installation_id: uuid.UUID,
+    project_id: uuid.UUID,
+    name: str | object = _UNSET,
+    app_url: str | None | object = _UNSET,
+) -> PersistedProject | None:
+    """Update editable metadata on an installation-owned project."""
+    values: dict[str, str | None] = {}
+    if name is not _UNSET:
+        values["name"] = str(name)
+    if app_url is not _UNSET:
+        values["app_url"] = None if app_url is None else str(app_url)
+
+    scope = (
+        models.Project.id == project_id,
+        models.Project.github_installation_id == installation_id,
+    )
+    if values:
+        stmt = (
+            update(models.Project)
+            .where(*scope)
+            .values(**values)
+            .returning(models.Project)
+        )
+    else:
+        stmt = select(models.Project).where(*scope)
+
+    project = (await db.execute(stmt)).scalar_one_or_none()
+    return _to_persisted_project(project) if project is not None else None
 
 
 def _to_persisted_project(project: models.Project) -> PersistedProject:

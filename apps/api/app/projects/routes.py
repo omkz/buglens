@@ -8,7 +8,7 @@ from datetime import datetime
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from .repository import (
     PersistedProject,
     create_project as persist_project,
     list_projects as load_projects,
+    update_project as persist_project_update,
 )
 
 logger = structlog.get_logger(__name__)
@@ -41,6 +42,20 @@ class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     github_repository_id: int = Field(gt=0)
     app_url: HttpUrl | None = None
+
+
+class UpdateProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    app_url: HttpUrl | None = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def reject_null_name(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("Name cannot be null.")
+        return value
 
 
 class ProjectResponse(BaseModel):
@@ -158,6 +173,55 @@ async def get_projects(
             for project in projects
         ]
     )
+
+
+@router.patch("/{project_id}", response_model=ProjectResponse)
+async def update_project(
+    project_id: uuid.UUID,
+    payload: UpdateProjectRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> PersistedProject:
+    connection = await _require_connection(request, db)
+    updates: dict[str, object] = {}
+    if "name" in payload.model_fields_set:
+        updates["name"] = payload.name
+    if "app_url" in payload.model_fields_set:
+        updates["app_url"] = (
+            str(payload.app_url) if payload.app_url is not None else None
+        )
+
+    try:
+        project = await persist_project_update(
+            db,
+            installation_id=connection.installation_id,
+            project_id=project_id,
+            **updates,
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "project_update_failed",
+            project_id=str(project_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Projects are temporarily unavailable.",
+        ) from None
+
+    logger.info(
+        "project_updated",
+        project_id=str(project.id),
+        installation_id=connection.github_installation_id,
+    )
+    return project
 
 
 async def _require_connection(

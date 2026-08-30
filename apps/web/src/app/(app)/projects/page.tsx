@@ -138,6 +138,15 @@ export default function ProjectsPage() {
     setIsCreating(false);
   }
 
+  function handleUpdate(project: Project) {
+    setProjectsState((current) => ({
+      ...current,
+      projects: current.projects.map((existing) =>
+        existing.id === project.id ? project : existing,
+      ),
+    }));
+  }
+
   const isGithubConnected = githubInfo.status === "connected";
 
   return (
@@ -182,7 +191,11 @@ export default function ProjectsPage() {
         ) : (
           <ul className="flex flex-col gap-3">
             {projectsState.projects.map((project) => (
-              <ProjectCard key={project.id} project={project} />
+              <ProjectCard
+                key={project.id}
+                project={project}
+                onUpdate={handleUpdate}
+              />
             ))}
           </ul>
         ))}

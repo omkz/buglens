@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from base64 import b64encode
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock
 
@@ -26,6 +27,7 @@ from app.projects.repository import (
     PersistedProject,
     create_project,
     list_projects,
+    update_project,
 )
 
 
@@ -368,6 +370,158 @@ def test_get_projects_scopes_to_current_installation(monkeypatch):
     assert [project["github_repository_id"] for project in response.json()["projects"]] == [123]
 
 
+def test_update_project_name_only_preserves_repository_binding(monkeypatch):
+    from app.projects import routes
+
+    connection = _connection()
+    original = _project()
+    updated = replace(original, name="Renamed Project")
+    persist = AsyncMock(return_value=updated)
+    monkeypatch.setattr(routes, "persist_project_update", persist)
+    client = _connected_client(monkeypatch, connection)
+
+    response = client.patch(
+        f"/api/projects/{original.id}", json={"name": "Renamed Project"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Renamed Project"
+    assert response.json()["github_repository_id"] == original.github_repository_id
+    assert (
+        response.json()["github_repository_full_name"]
+        == original.github_repository_full_name
+    )
+    persist.assert_awaited_once()
+    assert persist.await_args.kwargs == {
+        "installation_id": connection.installation_id,
+        "project_id": original.id,
+        "name": "Renamed Project",
+    }
+
+
+@pytest.mark.parametrize(
+    ("original_url", "submitted_url", "persisted_url"),
+    [
+        (None, "https://first.example.com", "https://first.example.com/"),
+        (
+            "https://old.example.com/",
+            "https://replacement.example.com/app",
+            "https://replacement.example.com/app",
+        ),
+    ],
+)
+def test_update_project_adds_or_changes_app_url(
+    monkeypatch, original_url: str | None, submitted_url: str, persisted_url: str
+):
+    from app.projects import routes
+
+    connection = _connection()
+    original = replace(_project(), app_url=original_url)
+    updated = replace(original, app_url=persisted_url)
+    persist = AsyncMock(return_value=updated)
+    monkeypatch.setattr(routes, "persist_project_update", persist)
+    client = _connected_client(monkeypatch, connection)
+
+    response = client.patch(
+        f"/api/projects/{original.id}", json={"app_url": submitted_url}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["app_url"] == persisted_url
+    assert persist.await_args.kwargs["app_url"] == persisted_url
+    assert "name" not in persist.await_args.kwargs
+
+
+def test_update_project_clears_app_url_with_null(monkeypatch):
+    from app.projects import routes
+
+    connection = _connection()
+    original = _project()
+    persist = AsyncMock(return_value=replace(original, app_url=None))
+    monkeypatch.setattr(routes, "persist_project_update", persist)
+    client = _connected_client(monkeypatch, connection)
+
+    response = client.patch(f"/api/projects/{original.id}", json={"app_url": None})
+
+    assert response.status_code == 200
+    assert response.json()["app_url"] is None
+    assert persist.await_args.kwargs["app_url"] is None
+
+
+def test_update_project_omitted_fields_remain_unchanged(monkeypatch):
+    from app.projects import routes
+
+    connection = _connection()
+    original = _project()
+    persist = AsyncMock(return_value=original)
+    monkeypatch.setattr(routes, "persist_project_update", persist)
+    client = _connected_client(monkeypatch, connection)
+
+    response = client.patch(f"/api/projects/{original.id}", json={})
+
+    assert response.status_code == 200
+    assert response.json()["name"] == original.name
+    assert response.json()["app_url"] == original.app_url
+    assert persist.await_args.kwargs == {
+        "installation_id": connection.installation_id,
+        "project_id": original.id,
+    }
+
+
+def test_update_project_inaccessible_to_installation_returns_404(monkeypatch):
+    from app.projects import routes
+
+    connection = _connection()
+    project_id = uuid.uuid4()
+    persist = AsyncMock(return_value=None)
+    monkeypatch.setattr(routes, "persist_project_update", persist)
+    client = _connected_client(monkeypatch, connection)
+
+    response = client.patch(
+        f"/api/projects/{project_id}", json={"name": "Inaccessible"}
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Project not found."}
+    assert persist.await_args.kwargs["installation_id"] == connection.installation_id
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"github_repository_id": 999},
+        {"github_repository_full_name": "other/repository"},
+        {"unknown": "value"},
+    ],
+)
+def test_update_project_rejects_unknown_and_repository_fields(monkeypatch, payload):
+    from app.projects import routes
+
+    persist = AsyncMock()
+    monkeypatch.setattr(routes, "persist_project_update", persist)
+    client = _connected_client(monkeypatch, _connection())
+
+    response = client.patch(f"/api/projects/{uuid.uuid4()}", json=payload)
+
+    assert response.status_code == 422
+    persist.assert_not_awaited()
+
+
+def test_update_project_rejects_invalid_app_url(monkeypatch):
+    from app.projects import routes
+
+    persist = AsyncMock()
+    monkeypatch.setattr(routes, "persist_project_update", persist)
+    client = _connected_client(monkeypatch, _connection())
+
+    response = client.patch(
+        f"/api/projects/{uuid.uuid4()}", json={"app_url": "not-a-url"}
+    )
+
+    assert response.status_code == 422
+    persist.assert_not_awaited()
+
+
 def test_project_models_never_store_github_credentials():
     from app.db.base import Base
 
@@ -453,6 +607,35 @@ def test_project_repository_enforces_uniqueness_and_installation_scope():
                     project.github_repository_full_name.startswith("first-org/")
                     for project in visible
                 )
+
+                updated = await update_project(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    project_id=first_project.id,
+                    name="Updated First Project",
+                    app_url="https://updated.example.com/",
+                )
+                inaccessible = await update_project(
+                    db,
+                    installation_id=second_connection.installation_id,
+                    project_id=first_project.id,
+                    name="Must Not Update",
+                )
+                await db.commit()
+
+                assert updated is not None
+                assert updated.name == "Updated First Project"
+                assert updated.app_url == "https://updated.example.com/"
+                assert (
+                    updated.github_repository_id
+                    == first_project.github_repository_id
+                )
+                assert (
+                    updated.github_repository_full_name
+                    == first_project.github_repository_full_name
+                )
+                assert updated.default_branch == first_project.default_branch
+                assert inaccessible is None
         finally:
             async with SessionLocal() as db:
                 await db.execute(
