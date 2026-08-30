@@ -92,6 +92,7 @@ def _result(*, with_plan: bool = True) -> AgentInvestigationResult:
         duplicate_candidates=[],
         reproduction_plan=plan,
         cannot_reproduce_reason=None if plan else "No application URL configured.",
+        cannot_propose_fix_reason="No safe fix was proposed for this test result.",
     )
 
 
@@ -177,6 +178,7 @@ def test_agent_result_optional_plan_contract_remains_strict():
                 "repository_findings": [],
                 "duplicate_candidates": [],
                 "cannot_reproduce_reason": "No application URL configured.",
+                "cannot_propose_fix_reason": "No safe fix was proposed.",
             }
         )
     )
@@ -190,6 +192,7 @@ def test_agent_result_optional_plan_contract_remains_strict():
                 "name": "Checkout navigation",
                 "actions": [{"type": "goto", "path": "/checkout"}],
             },
+            "cannot_propose_fix_reason": "No safe fix was proposed.",
         }
     )
     assert with_plan.reproduction_plan is not None
@@ -206,6 +209,7 @@ def test_agent_result_optional_plan_contract_remains_strict():
                 "repository_findings": [],
                 "duplicate_candidates": [],
                 "cannot_reproduce_reason": "No application URL configured.",
+                "cannot_propose_fix_reason": "No safe fix was proposed.",
                 "unexpected": "field",
             }
         )
@@ -337,6 +341,7 @@ async def test_adk_without_final_response_is_safely_classified(monkeypatch):
                     "duplicate_candidates": [],
                     "reproduction_plan": None,
                     "cannot_reproduce_reason": "No plan available.",
+                    "cannot_propose_fix_reason": "No safe fix was proposed.",
                 }
             ),
             "list_type",
@@ -749,6 +754,7 @@ def test_agent_findings_and_duplicate_candidates_must_come_from_scoped_tools():
             ],
             "reproduction_plan": None,
             "cannot_reproduce_reason": "No URL.",
+            "cannot_propose_fix_reason": "No safe fix was proposed.",
         }
     )
     _validate_agent_result(valid, context)
@@ -776,6 +782,44 @@ def _fix_proposal(*paths: str) -> FixProposal:
     )
 
 
+def test_agent_result_requires_exactly_one_fix_proposal_outcome():
+    base = {
+        "repository_findings": [],
+        "duplicate_candidates": [],
+        "reproduction_plan": {
+            "name": "Checkout navigation",
+            "actions": [{"type": "goto", "path": "/checkout"}],
+        },
+    }
+    proposal = _fix_proposal("src/checkout.ts").model_dump(mode="json")
+
+    with_proposal = AgentInvestigationResult.model_validate(
+        {**base, "fix_proposal": proposal}
+    )
+    assert with_proposal.fix_proposal is not None
+    assert with_proposal.cannot_propose_fix_reason is None
+
+    without_proposal = AgentInvestigationResult.model_validate(
+        {**base, "cannot_propose_fix_reason": "The relevant file was unavailable."}
+    )
+    assert without_proposal.fix_proposal is None
+    assert without_proposal.cannot_propose_fix_reason == (
+        "The relevant file was unavailable."
+    )
+
+    with pytest.raises(ValidationError, match="missing fix proposal requires a reason"):
+        AgentInvestigationResult.model_validate(base)
+
+    with pytest.raises(ValidationError, match="cannot also include a no-fix reason"):
+        AgentInvestigationResult.model_validate(
+            {
+                **base,
+                "fix_proposal": proposal,
+                "cannot_propose_fix_reason": "A contradictory reason.",
+            }
+        )
+
+
 def _fix_tool_context(*paths: str) -> GitHubToolContext:
     context = GitHubToolContext(
         installation_token="short-lived-token",
@@ -792,7 +836,9 @@ def _fix_tool_context(*paths: str) -> GitHubToolContext:
 
 def test_valid_one_file_fix_proposal_uses_exact_read_content():
     proposal = _fix_proposal("src/checkout.ts")
-    result = _result(with_plan=False).model_copy(update={"fix_proposal": proposal})
+    result = _result(with_plan=False).model_copy(
+        update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
+    )
 
     _validate_agent_result(result, _fix_tool_context("src/checkout.ts"))
 
@@ -800,7 +846,10 @@ def test_valid_one_file_fix_proposal_uses_exact_read_content():
 def test_multi_file_fix_proposal_within_limit_is_valid():
     paths = tuple(f"src/checkout-{index}.ts" for index in range(5))
     result = _result(with_plan=False).model_copy(
-        update={"fix_proposal": _fix_proposal(*paths)}
+        update={
+            "fix_proposal": _fix_proposal(*paths),
+            "cannot_propose_fix_reason": None,
+        }
     )
 
     _validate_agent_result(result, _fix_tool_context(*paths))
@@ -808,7 +857,10 @@ def test_multi_file_fix_proposal_within_limit_is_valid():
 
 def test_fix_proposal_for_unread_file_is_rejected():
     result = _result(with_plan=False).model_copy(
-        update={"fix_proposal": _fix_proposal("src/checkout.ts")}
+        update={
+            "fix_proposal": _fix_proposal("src/checkout.ts"),
+            "cannot_propose_fix_reason": None,
+        }
     )
     context = _fix_tool_context("src/checkout.ts")
     context.read_paths.clear()
@@ -820,7 +872,10 @@ def test_fix_proposal_for_unread_file_is_rejected():
 
 def test_fix_proposal_for_nonexistent_file_is_rejected():
     result = _result(with_plan=False).model_copy(
-        update={"fix_proposal": _fix_proposal("src/missing.ts")}
+        update={
+            "fix_proposal": _fix_proposal("src/missing.ts"),
+            "cannot_propose_fix_reason": None,
+        }
     )
     context = _fix_tool_context("src/checkout.ts")
     context.read_paths.add("src/missing.ts")
@@ -833,7 +888,9 @@ def test_fix_proposal_for_nonexistent_file_is_rejected():
 def test_fix_proposal_original_content_must_match_the_read_file():
     proposal = _fix_proposal("src/checkout.ts").model_copy(deep=True)
     proposal.files[0].original_content = "invented source\n"
-    result = _result(with_plan=False).model_copy(update={"fix_proposal": proposal})
+    result = _result(with_plan=False).model_copy(
+        update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
+    )
 
     with pytest.raises(InvestigationResultError, match="did not match"):
         _validate_agent_result(result, _fix_tool_context("src/checkout.ts"))
@@ -873,7 +930,7 @@ def test_fix_proposal_rejects_too_many_files_and_oversized_content():
 )
 def test_fix_proposal_for_forbidden_or_sensitive_path_is_rejected(path):
     result = _result(with_plan=False).model_copy(
-        update={"fix_proposal": _fix_proposal(path)}
+        update={"fix_proposal": _fix_proposal(path), "cannot_propose_fix_reason": None}
     )
 
     with pytest.raises(InvestigationResultError, match="unsafe repository path"):

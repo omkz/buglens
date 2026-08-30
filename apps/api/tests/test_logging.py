@@ -207,6 +207,7 @@ def test_provider_failure_log_keeps_safe_metadata_and_sanitizes_exception_chain(
                     "duplicate_candidates": [],
                     "reproduction_plan": None,
                     "cannot_reproduce_reason": "No plan available.",
+                    "cannot_propose_fix_reason": "No safe fix was proposed.",
                 }
             )
         except ValidationError as exc:

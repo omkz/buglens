@@ -154,7 +154,15 @@ class AgentInvestigationResult(StrictSchema):
     def require_plan_or_reason(self) -> "AgentInvestigationResult":
         if self.reproduction_plan is None and not self.cannot_reproduce_reason:
             raise ValueError("A missing browser plan requires a reason.")
-        if self.fix_proposal is not None and self.cannot_propose_fix_reason:
+        if self.fix_proposal is None and (
+            not self.cannot_propose_fix_reason
+            or not self.cannot_propose_fix_reason.strip()
+        ):
+            raise ValueError("A missing fix proposal requires a reason.")
+        if (
+            self.fix_proposal is not None
+            and self.cannot_propose_fix_reason is not None
+        ):
             raise ValueError("A fix proposal cannot also include a no-fix reason.")
         return self
 
