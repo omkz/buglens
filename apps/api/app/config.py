@@ -49,6 +49,9 @@ class Settings(DatabaseSettings):
     playwright_run_timeout_seconds: float = Field(default=60, gt=0, le=600)
     playwright_allow_private_network: bool = False
 
+    fix_validation_allow_host_execution: bool = False
+    fix_validation_trusted_repositories: str = ""
+
     session_secret: str
     session_cookie_secure: bool = False
 
@@ -59,6 +62,14 @@ class Settings(DatabaseSettings):
                 "GCS_BUCKET is required when EVIDENCE_STORAGE_BACKEND=gcs."
             )
         return self
+
+    @property
+    def trusted_fix_validation_repositories(self) -> frozenset[str]:
+        return frozenset(
+            repository.strip()
+            for repository in self.fix_validation_trusted_repositories.split(",")
+            if repository.strip()
+        )
 
 
 @lru_cache

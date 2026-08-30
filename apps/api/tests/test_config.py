@@ -47,11 +47,30 @@ def test_database_pool_and_local_development_defaults(monkeypatch):
     assert settings.evidence_storage_backend == "local"
     assert str(settings.evidence_storage_dir) == ".data/evidence"
     assert settings.playwright_allow_private_network is False
+    assert settings.fix_validation_allow_host_execution is False
+    assert settings.trusted_fix_validation_repositories == frozenset()
     assert settings.frontend_base_url == "http://localhost:3000"
     assert settings.backend_base_url == "http://localhost:3000/api"
     assert (
         settings.github_callback_url
         == "http://localhost:3000/api/github/oauth/callback"
+    )
+
+
+def test_fix_validation_trusted_repositories_are_explicit(monkeypatch):
+    monkeypatch.delenv("FIX_VALIDATION_ALLOW_HOST_EXECUTION", raising=False)
+    monkeypatch.delenv("FIX_VALIDATION_TRUSTED_REPOSITORIES", raising=False)
+
+    settings = _settings(
+        fix_validation_allow_host_execution=True,
+        fix_validation_trusted_repositories=(
+            "omkz/buglens-demo-target, trusted/example "
+        ),
+    )
+
+    assert settings.fix_validation_allow_host_execution is True
+    assert settings.trusted_fix_validation_repositories == frozenset(
+        {"omkz/buglens-demo-target", "trusted/example"}
     )
 
 

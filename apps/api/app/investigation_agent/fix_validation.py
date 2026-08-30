@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import shutil
+import socket
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -59,6 +61,7 @@ class FixValidationContext(BaseModel):
 
 CommandRunner = Callable[[list[str], Path, int], Awaitable[FixValidationCheck]]
 Materializer = Callable[[str, FixValidationContext, Path], Awaitable[None]]
+PortSelector = Callable[[], int]
 
 
 class FixValidationService:
@@ -70,12 +73,14 @@ class FixValidationService:
         workspace_parent: Path | None = None,
         command_runner: CommandRunner | None = None,
         materializer: Materializer | None = None,
+        port_selector: PortSelector | None = None,
     ):
         self.settings = settings
         self.browser_runner = browser_runner
         self.workspace_parent = workspace_parent
         self.command_runner = command_runner or _run_command
         self.materializer = materializer or _clone_repository
+        self.port_selector = port_selector or _available_loopback_port
 
     async def validate(self, context: FixValidationContext) -> FixValidationResult:
         workspace_root = Path(
@@ -92,7 +97,10 @@ class FixValidationService:
                 await self.materializer(token, context, checkout)
             except Exception:
                 return _result(
-                    "blocked", "The isolated repository checkout could not be prepared.", checks, context
+                    "blocked",
+                    "The isolated repository checkout could not be prepared.",
+                    checks,
+                    context,
                 )
             finally:
                 del token
@@ -107,10 +115,38 @@ class FixValidationService:
                 )
                 return _result(status, apply_result.output, checks, context)
 
+            if not self._host_execution_is_allowed(context.repository_full_name):
+                checks.append(
+                    FixValidationCheck(
+                        name="Executable validation gate",
+                        status="blocked",
+                        output=(
+                            "Executable validation requires host execution to be enabled "
+                            "and this development repository to be explicitly trusted."
+                        ),
+                    )
+                )
+                return _result(
+                    "blocked",
+                    "Executable validation is disabled for this repository.",
+                    checks,
+                    context,
+                )
+
             checks.extend(await self._run_known_checks(checkout))
             if any(check.status in {"failed", "timed_out"} for check in checks):
                 return _result(
-                    "validation_failed", "One or more bounded validation checks failed.", checks, context
+                    "validation_failed",
+                    "One or more bounded validation checks failed.",
+                    checks,
+                    context,
+                )
+            if any(check.status == "blocked" for check in checks):
+                return _result(
+                    "blocked",
+                    "A bounded validation check could not run safely.",
+                    checks,
+                    context,
                 )
 
             after = await self._rerun_browser_when_supported(checkout, context, checks)
@@ -124,18 +160,42 @@ class FixValidationService:
                 )
             if after == "reproduced":
                 return _result(
-                    "validation_failed", "The browser reproduction still reproduces the bug.", checks, context, after
+                    "validation_failed",
+                    "The browser reproduction still reproduces the bug.",
+                    checks,
+                    context,
+                    after,
+                )
+            if after == "blocked":
+                return _result(
+                    "blocked",
+                    "Browser verification could not run safely.",
+                    checks,
+                    context,
+                    after,
+                )
+            if context.reproduction_before == "reproduced":
+                return _result(
+                    "not_run",
+                    "Checks passed, but the original browser failure was not verified after the patch.",
+                    checks,
+                    context,
+                    after,
                 )
             if checks and all(check.status == "passed" for check in checks):
                 return _result(
                     "validated",
-                    "All available bounded validation checks passed; browser reproduction was unavailable.",
+                    "All available bounded validation checks passed.",
                     checks,
                     context,
                     after,
                 )
             return _result(
-                "not_run", "No supported bounded validation checks were available.", checks, context, after
+                "not_run",
+                "No supported bounded validation checks were available.",
+                checks,
+                context,
+                after,
             )
         except Exception:
             return _result(
@@ -147,15 +207,41 @@ class FixValidationService:
         finally:
             shutil.rmtree(workspace_root, ignore_errors=True)
 
+    def _host_execution_is_allowed(self, repository_full_name: str) -> bool:
+        if not getattr(self.settings, "fix_validation_allow_host_execution", False):
+            return False
+        trusted = getattr(self.settings, "trusted_fix_validation_repositories", None)
+        if trusted is None:
+            configured = getattr(
+                self.settings, "fix_validation_trusted_repositories", ""
+            )
+            trusted = {
+                item.strip() for item in configured.split(",") if item.strip()
+            }
+        return repository_full_name in trusted
+
     async def _run_known_checks(self, checkout: Path) -> list[FixValidationCheck]:
         checks: list[FixValidationCheck] = []
         package_json = checkout / "package.json"
         if package_json.is_file():
             manager: list[str] | None = None
             if (checkout / "pnpm-lock.yaml").is_file() and shutil.which("pnpm"):
-                manager = ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--offline"]
+                manager = [
+                    "pnpm",
+                    "install",
+                    "--frozen-lockfile",
+                    "--ignore-scripts",
+                    "--offline",
+                ]
             elif (checkout / "package-lock.json").is_file() and shutil.which("npm"):
-                manager = ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--offline"]
+                manager = [
+                    "npm",
+                    "ci",
+                    "--ignore-scripts",
+                    "--no-audit",
+                    "--no-fund",
+                    "--offline",
+                ]
             if manager is not None:
                 install = await self.command_runner(manager, checkout, _COMMAND_TIMEOUT)
                 install.name = "Install dependencies without lifecycle scripts"
@@ -164,13 +250,27 @@ class FixValidationService:
                     return checks
             bin_dir = checkout / "node_modules" / ".bin"
             if (checkout / "tsconfig.json").is_file() and (bin_dir / "tsc").is_file():
-                checks.append(await self.command_runner([str(bin_dir / "tsc"), "--noEmit"], checkout, _COMMAND_TIMEOUT))
+                checks.append(
+                    await self.command_runner(
+                        [str(bin_dir / "tsc"), "--noEmit"],
+                        checkout,
+                        _COMMAND_TIMEOUT,
+                    )
+                )
                 checks[-1].name = "TypeScript typecheck"
             if any(checkout.glob("eslint.config.*")) and (bin_dir / "eslint").is_file():
-                checks.append(await self.command_runner([str(bin_dir / "eslint"), "."], checkout, _COMMAND_TIMEOUT))
+                checks.append(
+                    await self.command_runner(
+                        [str(bin_dir / "eslint"), "."], checkout, _COMMAND_TIMEOUT
+                    )
+                )
                 checks[-1].name = "ESLint"
         elif _python_tests_configured(checkout):
-            check = await self.command_runner([sys.executable, "-m", "pytest", "-q"], checkout, _COMMAND_TIMEOUT)
+            check = await self.command_runner(
+                [sys.executable, "-m", "pytest", "-q"],
+                checkout,
+                _COMMAND_TIMEOUT,
+            )
             check.name = "Pytest"
             checks.append(check)
         return checks
@@ -185,29 +285,58 @@ class FixValidationService:
         next_bin = checkout / "node_modules" / ".bin" / "next"
         if plan is None or not next_bin.is_file():
             return None
-        port = 4173
+        port = self.port_selector()
         process = await asyncio.create_subprocess_exec(
-            str(next_bin), "dev", "--hostname", "127.0.0.1", "--port", str(port),
-            cwd=checkout, env=_safe_environment(checkout),
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            str(next_bin),
+            "dev",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            cwd=checkout,
+            env=_safe_environment(checkout),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
         )
         try:
             ready = await _wait_for_app(f"http://127.0.0.1:{port}")
             if not ready:
-                checks.append(FixValidationCheck(name="Start isolated application", status="blocked", output="The application did not become ready within the bounded startup window."))
+                checks.append(
+                    FixValidationCheck(
+                        name="Start isolated application",
+                        status="blocked",
+                        output=(
+                            "The application did not become ready within the "
+                            "bounded startup window."
+                        ),
+                    )
+                )
                 return None
-            checks.append(FixValidationCheck(name="Start isolated application", status="passed", output="The isolated application became ready."))
-            execution = await self.browser_runner.run(plan, app_url=f"http://127.0.0.1:{port}")
-            checks.append(FixValidationCheck(name="Browser reproduction", status="passed" if execution.status == "not_reproduced" else "failed", output=execution.summary[:_MAX_OUTPUT]))
+            checks.append(
+                FixValidationCheck(
+                    name="Start isolated application",
+                    status="passed",
+                    output="The isolated application became ready.",
+                )
+            )
+            execution = await self.browser_runner.run(
+                plan, app_url=f"http://127.0.0.1:{port}"
+            )
+            checks.append(
+                FixValidationCheck(
+                    name="Browser reproduction",
+                    status=(
+                        "passed"
+                        if execution.status == "not_reproduced"
+                        else "failed"
+                    ),
+                    output=execution.summary[:_MAX_OUTPUT],
+                )
+            )
             return execution.status
         finally:
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
+            await _terminate_process_group(process)
 
 
 def _apply_proposal(checkout: Path, proposal: FixProposal) -> FixValidationCheck | None:
@@ -215,16 +344,32 @@ def _apply_proposal(checkout: Path, proposal: FixProposal) -> FixValidationCheck
     resolved: list[tuple[Path, str]] = []
     for change in proposal.files:
         if is_forbidden_fix_path(change.path):
-            return FixValidationCheck(name="Apply proposal", status="blocked", output="The proposal contains an unsafe path.")
+            return FixValidationCheck(
+                name="Apply proposal",
+                status="blocked",
+                output="The proposal contains an unsafe path.",
+            )
         target = (checkout / change.path).resolve()
         if not target.is_relative_to(root) or not target.is_file():
-            return FixValidationCheck(name="Apply proposal", status="blocked", output="A proposed file is outside the isolated checkout or missing.")
+            return FixValidationCheck(
+                name="Apply proposal",
+                status="blocked",
+                output="A proposed file is outside the isolated checkout or missing.",
+            )
         try:
             current = target.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
-            return FixValidationCheck(name="Apply proposal", status="blocked", output="A proposed file is not readable UTF-8 text.")
+            return FixValidationCheck(
+                name="Apply proposal",
+                status="blocked",
+                output="A proposed file is not readable UTF-8 text.",
+            )
         if current != change.original_content:
-            return FixValidationCheck(name="Apply proposal", status="failed", output="The proposal baseline is stale.")
+            return FixValidationCheck(
+                name="Apply proposal",
+                status="failed",
+                output="The proposal baseline is stale.",
+            )
         resolved.append((target, change.updated_content))
     for target, content in resolved:
         target.write_text(content, encoding="utf-8")
@@ -255,48 +400,138 @@ async def _clone_repository(token: str, context: FixValidationContext, checkout:
         }
     )
     process = await asyncio.create_subprocess_exec(
-        "git", "clone", "--depth", "1", "--single-branch", "--no-tags", "--branch",
-        context.default_branch, "--", f"https://github.com/{owner}/{repository}.git", str(checkout),
-        env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        "--single-branch",
+        "--no-tags",
+        "--branch",
+        context.default_branch,
+        "--",
+        f"https://github.com/{owner}/{repository}.git",
+        str(checkout),
+        env=env,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=_COMMAND_TIMEOUT)
+        await asyncio.wait_for(process.wait(), timeout=_COMMAND_TIMEOUT)
     except TimeoutError:
-        process.kill()
-        await process.wait()
+        await _terminate_process_group(process)
         raise RuntimeError("Clone timed out.") from None
     finally:
         askpass.unlink(missing_ok=True)
     if process.returncode != 0:
         raise RuntimeError("Clone failed.")
-    del stdout, stderr
 
 
 async def _run_command(command: list[str], cwd: Path, timeout: int) -> FixValidationCheck:
     name = Path(command[0]).name
     process = await asyncio.create_subprocess_exec(
-        *command, cwd=cwd, env=_safe_environment(cwd),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        *command,
+        cwd=cwd,
+        env=_safe_environment(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
+    output = bytearray()
+    drainers = [
+        asyncio.create_task(_drain_bounded(process.stdout, output)),
+        asyncio.create_task(_drain_bounded(process.stderr, output)),
+    ]
+    timed_out = False
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        await asyncio.wait_for(process.wait(), timeout=timeout)
     except TimeoutError:
-        process.kill()
-        stdout, stderr = await process.communicate()
-        return FixValidationCheck(name=name, status="timed_out", output=_bounded_output(stdout, stderr))
-    return FixValidationCheck(name=name, status="passed" if process.returncode == 0 else "failed", output=_bounded_output(stdout, stderr))
+        timed_out = True
+        await _terminate_process_group(process)
+    finally:
+        # A command can exit while leaving children holding the pipes open.
+        # Stop any remaining members of its isolated process group before draining.
+        await _terminate_process_group(process)
+        try:
+            await asyncio.wait_for(asyncio.gather(*drainers), timeout=2)
+        except TimeoutError:
+            _signal_process_group(process.pid, signal.SIGKILL)
+            for drainer in drainers:
+                drainer.cancel()
+            await asyncio.gather(*drainers, return_exceptions=True)
+    status = (
+        "timed_out"
+        if timed_out
+        else ("passed" if process.returncode == 0 else "failed")
+    )
+    return FixValidationCheck(
+        name=name,
+        status=status,
+        output=output.decode("utf-8", errors="replace"),
+    )
 
 
 def _safe_environment(workspace: Path) -> dict[str, str]:
     return {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": str(workspace), "CI": "1", "NO_COLOR": "1", "LANG": "C.UTF-8",
+        "HOME": str(workspace),
+        "CI": "1",
+        "NO_COLOR": "1",
+        "LANG": "C.UTF-8",
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
     }
 
 
-def _bounded_output(stdout: bytes, stderr: bytes) -> str:
-    return (stdout + stderr).decode("utf-8", errors="replace")[-_MAX_OUTPUT:]
+async def _drain_bounded(
+    stream: asyncio.StreamReader | None, output: bytearray
+) -> None:
+    if stream is None:
+        return
+    while chunk := await stream.read(8_192):
+        if len(chunk) >= _MAX_OUTPUT:
+            output[:] = chunk[-_MAX_OUTPUT:]
+            continue
+        overflow = len(output) + len(chunk) - _MAX_OUTPUT
+        if overflow > 0:
+            del output[:overflow]
+        output.extend(chunk)
+
+
+def _available_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
+        candidate.bind(("127.0.0.1", 0))
+        return int(candidate.getsockname()[1])
+
+
+def _signal_process_group(pid: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _process_group_exists(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _terminate_process_group(process: asyncio.subprocess.Process) -> None:
+    _signal_process_group(process.pid, signal.SIGTERM)
+    deadline = asyncio.get_running_loop().time() + 2
+    while (
+        _process_group_exists(process.pid)
+        and asyncio.get_running_loop().time() < deadline
+    ):
+        await asyncio.sleep(0.05)
+    if _process_group_exists(process.pid):
+        _signal_process_group(process.pid, signal.SIGKILL)
+    if process.returncode is None:
+        await process.wait()
 
 
 def _python_tests_configured(checkout: Path) -> bool:
@@ -315,7 +550,19 @@ async def _wait_for_app(url: str) -> bool:
     return False
 
 
-def _result(status: str, summary: str, checks: list[FixValidationCheck], context: FixValidationContext, after: str | None = None) -> FixValidationResult:
+def _result(
+    status: str,
+    summary: str,
+    checks: list[FixValidationCheck],
+    context: FixValidationContext,
+    after: str | None = None,
+) -> FixValidationResult:
     if status == "stale_proposal":
         summary = "The repository file no longer matches the persisted proposal baseline."
-    return FixValidationResult(status=status, summary=summary, checks=checks, reproduction_before=context.reproduction_before, reproduction_after=after)
+    return FixValidationResult(
+        status=status,
+        summary=summary,
+        checks=checks,
+        reproduction_before=context.reproduction_before,
+        reproduction_after=after,
+    )
