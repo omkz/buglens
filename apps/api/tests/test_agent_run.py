@@ -840,7 +840,13 @@ def test_valid_one_file_fix_proposal_uses_exact_read_content():
         update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
     )
 
-    _validate_agent_result(result, _fix_tool_context("src/checkout.ts"))
+    validated = _validate_agent_result(
+        result, _fix_tool_context("src/checkout.ts")
+    )
+
+    assert validated is result
+    assert validated.fix_proposal == proposal
+    assert validated.cannot_propose_fix_reason is None
 
 
 def test_multi_file_fix_proposal_within_limit_is_valid():
@@ -855,7 +861,7 @@ def test_multi_file_fix_proposal_within_limit_is_valid():
     _validate_agent_result(result, _fix_tool_context(*paths))
 
 
-def test_fix_proposal_for_unread_file_is_rejected():
+def test_fix_proposal_for_unread_file_is_discarded():
     result = _result(with_plan=False).model_copy(
         update={
             "fix_proposal": _fix_proposal("src/checkout.ts"),
@@ -866,11 +872,13 @@ def test_fix_proposal_for_unread_file_is_rejected():
     context.read_paths.clear()
     context.read_files.clear()
 
-    with pytest.raises(InvestigationResultError, match="did not read"):
-        _validate_agent_result(result, context)
+    validated = _validate_agent_result(result, context)
+
+    assert validated.fix_proposal is None
+    assert validated.cannot_propose_fix_reason
 
 
-def test_fix_proposal_for_nonexistent_file_is_rejected():
+def test_fix_proposal_for_nonexistent_file_is_discarded():
     result = _result(with_plan=False).model_copy(
         update={
             "fix_proposal": _fix_proposal("src/missing.ts"),
@@ -881,8 +889,10 @@ def test_fix_proposal_for_nonexistent_file_is_rejected():
     context.read_paths.add("src/missing.ts")
     context.read_files["src/missing.ts"] = "return false;\n"
 
-    with pytest.raises(InvestigationResultError, match="nonexistent"):
-        _validate_agent_result(result, context)
+    validated = _validate_agent_result(result, context)
+
+    assert validated.fix_proposal is None
+    assert validated.cannot_propose_fix_reason
 
 
 def test_fix_proposal_original_content_must_match_the_read_file():
@@ -892,8 +902,16 @@ def test_fix_proposal_original_content_must_match_the_read_file():
         update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
     )
 
-    with pytest.raises(InvestigationResultError, match="did not match"):
-        _validate_agent_result(result, _fix_tool_context("src/checkout.ts"))
+    validated = _validate_agent_result(
+        result, _fix_tool_context("src/checkout.ts")
+    )
+
+    assert validated.fix_proposal is None
+    assert validated.cannot_propose_fix_reason == (
+        "The proposed fix could not be safely verified against the retrieved "
+        "repository files."
+    )
+    assert validated.reproduction_plan == result.reproduction_plan
 
 
 def test_fix_proposal_rejects_too_many_files_and_oversized_content():
@@ -928,13 +946,15 @@ def test_fix_proposal_rejects_too_many_files_and_oversized_content():
         "public/logo.png",
     ],
 )
-def test_fix_proposal_for_forbidden_or_sensitive_path_is_rejected(path):
+def test_fix_proposal_for_forbidden_or_sensitive_path_is_discarded(path):
     result = _result(with_plan=False).model_copy(
         update={"fix_proposal": _fix_proposal(path), "cannot_propose_fix_reason": None}
     )
 
-    with pytest.raises(InvestigationResultError, match="unsafe repository path"):
-        _validate_agent_result(result, _fix_tool_context(path))
+    validated = _validate_agent_result(result, _fix_tool_context(path))
+
+    assert validated.fix_proposal is None
+    assert validated.cannot_propose_fix_reason
 
 
 def test_no_fix_proposal_remains_a_successful_result_with_reason():
@@ -1029,6 +1049,82 @@ async def test_service_emits_progress_only_at_trusted_orchestration_boundaries(
         ("preparing_reproduction", "Preparing browser reproduction…"),
         ("running_browser", "Running browser reproduction…"),
     ]
+
+
+@pytest.mark.anyio
+async def test_service_discards_unverified_fix_and_still_runs_browser(monkeypatch):
+    from app.investigation_agent import service as service_module
+
+    plan = _result(with_plan=True).reproduction_plan
+    assert plan is not None
+    proposal = _fix_proposal("src/checkout.ts").model_copy(deep=True)
+    proposal.files[0].original_content = "stale source\n"
+    agent_result = _result(with_plan=True).model_copy(
+        update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
+    )
+
+    class Agent:
+        model_name = "gemini-test-model"
+
+        async def investigate(self, **kwargs):
+            return agent_result
+
+    class Runner:
+        def __init__(self):
+            self.plan = None
+
+        async def run(self, received_plan, *, app_url):
+            self.plan = received_plan
+            return BrowserExecutionResult(
+                status="reproduced",
+                completed_actions=1,
+                failed_action_index=1,
+                expected="/checkout",
+                actual="/cart",
+                summary="Checkout navigation remained on the cart page.",
+            )
+
+    class ToolContext:
+        had_github_failure = False
+        known_paths = {"src/checkout.ts"}
+        read_paths = {"src/checkout.ts"}
+        read_files = {"src/checkout.ts": "return false;\n"}
+        returned_issues = {}
+
+        def __init__(self, **kwargs):
+            pass
+
+        def tools(self):
+            return []
+
+    async def token(**kwargs):
+        return "short-lived-token"
+
+    runner = Runner()
+    monkeypatch.setattr(service_module, "create_scoped_installation_token", token)
+    monkeypatch.setattr(service_module, "GitHubToolContext", ToolContext)
+    service = InvestigationAgentService(
+        agent=Agent(),
+        runner=runner,
+        settings=SimpleNamespace(
+            google_cloud_project="orbital-wharf-427808-p5",
+            google_cloud_location="global",
+            playwright_allow_private_network=False,
+        ),
+    )
+
+    result, generated_test, execution = await service.investigate(_context())
+
+    assert result.fix_proposal is None
+    assert result.cannot_propose_fix_reason == (
+        "The proposed fix could not be safely verified against the retrieved "
+        "repository files."
+    )
+    assert result.reproduction_plan == plan
+    assert runner.plan == plan
+    assert generated_test is not None
+    assert execution is not None
+    assert execution.status == "reproduced"
 
 
 class _FakeLocator:
@@ -1388,6 +1484,93 @@ def test_agent_run_is_installation_scoped_ignores_browser_ids_and_persists(monke
     assert captured["complete"]["attempt_id"] == attempt_id
     assert service.calls == [context]
     assert response.json()["status"] == "completed"
+
+
+def test_completed_reproduced_agent_run_builds_valid_post_response_before_commit(
+    monkeypatch,
+):
+    from app.investigations import routes
+
+    execution = BrowserExecutionResult(
+        status="reproduced",
+        completed_actions=1,
+        failed_action_index=1,
+        expected="/checkout",
+        actual="https://demo.example.com/cart",
+        summary="The reported failure was reproduced.",
+    )
+    service = _FakeAgentService((_result(with_plan=True), "generated test", execution))
+    client, app, routes, _connection = _connected_client(monkeypatch, service)
+    context = _context()
+    attempt_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    persisted = replace(
+        _persisted_run(context.investigation_id),
+        reproduction_plan=_result(with_plan=True).reproduction_plan.model_dump(
+            mode="json"
+        ),
+        generated_test="generated test",
+        reproduction_status="reproduced",
+        execution_result=execution.model_dump(mode="json"),
+        execution_summary=execution.summary,
+        progress_stage="completed",
+        progress_message="Investigation completed.",
+        progress_updated_at=now,
+        run_attempt_id=attempt_id,
+        fix_validation_status=None,
+        fix_validation_result=None,
+    )
+    response_built = False
+
+    class OrderingDb(_FakeDb):
+        commits = 0
+
+        async def commit(self):
+            self.commits += 1
+            if self.commits == 2:
+                assert response_built is True
+
+    database = OrderingDb()
+
+    async def database_dependency():
+        yield database
+
+    async def claim(*args, **kwargs):
+        return AgentRunClaim(state=AgentRunClaimState.READY, context=context)
+
+    async def complete(*args, **kwargs):
+        assert kwargs["attempt_id"] == attempt_id
+        return persisted
+
+    build_response = routes._agent_run_response
+
+    def tracked_response(*args, **kwargs):
+        nonlocal response_built
+        response = build_response(*args, **kwargs)
+        response_built = True
+        return response
+
+    app.dependency_overrides[get_db] = database_dependency
+    monkeypatch.setattr(routes, "claim_agent_run", claim)
+    monkeypatch.setattr(routes, "complete_agent_run", complete)
+    monkeypatch.setattr(routes, "_agent_run_response", tracked_response)
+    try:
+        response = client.post(
+            f"/api/investigations/{context.investigation_id}/agent-run",
+            json={"attempt_id": str(attempt_id)},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["attempt_id"] == str(attempt_id)
+    assert body["result"]["reproduction_status"] == "reproduced"
+    assert body["result"]["execution"]["status"] == "reproduced"
+    assert body["progress"]["stage"] == "completed"
+    assert body["fix_validation"] is None
+    assert database.commits == 2
 
 
 def test_agent_run_request_rejects_browser_selected_metadata(monkeypatch):

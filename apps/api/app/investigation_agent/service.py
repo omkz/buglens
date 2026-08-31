@@ -33,6 +33,10 @@ class InvestigationResultError(RuntimeError):
 
 
 ProgressCallback = Callable[[str, str], Awaitable[None]]
+_UNVERIFIED_FIX_PROPOSAL_REASON = (
+    "The proposed fix could not be safely verified against the retrieved "
+    "repository files."
+)
 
 
 class InvestigationAgentService:
@@ -97,7 +101,7 @@ class InvestigationAgentService:
             )
             if github_tools.had_github_failure and not github_tools.known_paths:
                 raise InvestigationGitHubError("GitHub is unavailable.")
-            _validate_agent_result(result, github_tools)
+            result = _validate_agent_result(result, github_tools)
         finally:
             del installation_token
 
@@ -136,7 +140,7 @@ class InvestigationAgentService:
 
 def _validate_agent_result(
     result: AgentInvestigationResult, github_tools: GitHubToolContext
-) -> None:
+) -> AgentInvestigationResult:
     for finding in result.repository_findings:
         if finding.path not in github_tools.read_paths:
             raise InvestigationResultError(
@@ -153,21 +157,31 @@ def _validate_agent_result(
                 "Agent cited an issue that was not returned by the scoped search."
             )
     if result.fix_proposal is None:
-        return
+        return result
     for change in result.fix_proposal.files:
         if is_forbidden_fix_path(change.path):
-            raise InvestigationResultError("Agent proposed an unsafe repository path.")
+            return _without_unverified_fix_proposal(result)
         if change.path not in github_tools.known_paths:
-            raise InvestigationResultError("Agent proposed a nonexistent repository file.")
+            return _without_unverified_fix_proposal(result)
         original = github_tools.read_files.get(change.path)
         if original is None:
-            raise InvestigationResultError("Agent proposed a file it did not read.")
+            return _without_unverified_fix_proposal(result)
         if change.original_content != original:
-            raise InvestigationResultError(
-                "Agent proposal did not match the retrieved repository file."
-            )
+            return _without_unverified_fix_proposal(result)
         if (
             len(change.original_content.encode("utf-8")) > MAX_FIX_CONTENT_BYTES
             or len(change.updated_content.encode("utf-8")) > MAX_FIX_CONTENT_BYTES
         ):
-            raise InvestigationResultError("Agent proposal content is too large.")
+            return _without_unverified_fix_proposal(result)
+    return result
+
+
+def _without_unverified_fix_proposal(
+    result: AgentInvestigationResult,
+) -> AgentInvestigationResult:
+    return result.model_copy(
+        update={
+            "fix_proposal": None,
+            "cannot_propose_fix_reason": _UNVERIFIED_FIX_PROPOSAL_REASON,
+        }
+    )

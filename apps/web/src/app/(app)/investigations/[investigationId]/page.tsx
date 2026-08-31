@@ -455,16 +455,23 @@ export default function InvestigationDetailPage() {
           : current,
       );
     } catch (error) {
-      setInvestigationError(
-        error instanceof Error
-          ? error.message
-          : "Autonomous investigation failed. Please try again.",
-      );
+      let reconciledCompleted = false;
       try {
-        await refreshAgentRunStatus(attemptId);
+        const reconciled = await refreshAgentRunStatus(attemptId);
+        reconciledCompleted =
+          latestAgentRunAttemptRef.current === attemptId &&
+          reconciled.attempt_id === attemptId &&
+          reconciled.status === "completed";
       } catch {
         // A refresh reloads the persisted run state.
       }
+      setInvestigationError(
+        reconciledCompleted
+          ? null
+          : error instanceof Error
+            ? error.message
+            : "Autonomous investigation failed. Please try again.",
+      );
     } finally {
       progressSource.close();
       if (progressSourceRef.current === progressSource) {

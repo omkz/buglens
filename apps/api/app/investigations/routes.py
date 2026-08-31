@@ -891,6 +891,7 @@ async def run_agent_investigation(
             generated_test=generated_test,
             execution=execution,
         )
+        response = _agent_run_response(investigation_id, persisted)
         await db.commit()
     except SQLAlchemyError:
         await db.rollback()
@@ -906,7 +907,7 @@ async def run_agent_investigation(
             status_code=503,
             detail="Investigation is temporarily unavailable.",
         ) from None
-    return _agent_run_response(investigation_id, persisted)
+    return response
 
 
 @router.get(
