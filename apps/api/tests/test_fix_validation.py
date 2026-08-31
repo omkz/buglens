@@ -22,7 +22,11 @@ from app.investigation_agent.repository import (
     FixValidationClaim,
     FixValidationClaimState,
 )
-from app.investigation_agent.schemas import BrowserExecutionResult, FixProposal
+from app.investigation_agent.schemas import (
+    BrowserExecutionResult,
+    BrowserTestPlan,
+    FixProposal,
+)
 
 
 def _proposal(path: str = "src/checkout.ts", original: str = "old\n") -> FixProposal:
@@ -49,6 +53,15 @@ def _context(proposal: FixProposal | None = None) -> FixValidationContext:
         fix_proposal=proposal or _proposal(),
         reproduction_plan=None,
         reproduction_before="reproduced",
+    )
+
+
+def _browser_plan() -> BrowserTestPlan:
+    return BrowserTestPlan.model_validate(
+        {
+            "name": "Checkout navigation",
+            "actions": [{"type": "expect_url", "value": "/checkout"}],
+        }
     )
 
 
@@ -400,6 +413,8 @@ async def test_browser_result_preserves_overall_validation_semantics(
 ):
     from app.investigation_agent import fix_validation as module
 
+    replay_calls = 0
+
     async def token(**kwargs):
         return "token"
 
@@ -412,6 +427,8 @@ async def test_browser_result_preserves_overall_validation_semantics(
         return FixValidationCheck(name="Pytest", status="passed", output="ok")
 
     async def browser_result(checkout, context, checks):
+        nonlocal replay_calls
+        replay_calls += 1
         checks.append(
             FixValidationCheck(
                 name="Browser reproduction",
@@ -431,11 +448,121 @@ async def test_browser_result_preserves_overall_validation_semantics(
     )
     monkeypatch.setattr(service, "_rerun_browser_when_supported", browser_result)
 
-    result = await service.validate(_context())
+    context = _context().model_copy(
+        update={"reproduction_plan": _browser_plan()}
+    )
+    result = await service.validate(context)
 
     assert result.status == result_status
     assert result.reproduction_after == browser_status
     assert result.checks[-1].status == check_status
+    assert replay_calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reproduction_before", ["blocked", "not_reproduced", None])
+async def test_browser_replay_is_skipped_without_reproduced_baseline(
+    monkeypatch,
+    tmp_path,
+    reproduction_before,
+):
+    from app.investigation_agent import fix_validation as module
+
+    async def token(**kwargs):
+        return "token"
+
+    async def materialize(value, context, checkout):
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "checkout.ts").write_text("old\n")
+        (checkout / "tests").mkdir()
+
+    async def passing_check(command, cwd, timeout):
+        return FixValidationCheck(name="Pytest", status="passed", output="ok")
+
+    async def must_not_replay(checkout, context, checks):
+        raise AssertionError("Browser replay requires a reproduced baseline.")
+
+    monkeypatch.setattr(module, "create_scoped_installation_token", token)
+    service = FixValidationService(
+        settings=_settings(),
+        browser_runner=BrowserRunner(),
+        workspace_parent=tmp_path,
+        materializer=materialize,
+        command_runner=passing_check,
+    )
+    monkeypatch.setattr(
+        service,
+        "_rerun_browser_when_supported",
+        must_not_replay,
+    )
+    context = _context().model_copy(
+        update={
+            "reproduction_before": reproduction_before,
+            "reproduction_plan": _browser_plan(),
+        }
+    )
+
+    result = await service.validate(context)
+
+    assert result.status == "validated"
+    assert result.reproduction_after is None
+    assert result.summary == (
+        "All available bounded validation checks passed; browser fix verification "
+        "was skipped because the original bug was not reproduced."
+    )
+    assert all(check.name != "Browser reproduction" for check in result.checks)
+
+
+@pytest.mark.anyio
+async def test_skipped_browser_replay_keeps_bounded_check_failure(
+    monkeypatch,
+    tmp_path,
+):
+    from app.investigation_agent import fix_validation as module
+
+    async def token(**kwargs):
+        return "token"
+
+    async def materialize(value, context, checkout):
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "checkout.ts").write_text("old\n")
+        (checkout / "tests").mkdir()
+
+    async def failing_check(command, cwd, timeout):
+        return FixValidationCheck(
+            name="Pytest",
+            status="failed",
+            output="Bounded test failure.",
+        )
+
+    async def must_not_replay(checkout, context, checks):
+        raise AssertionError("Browser replay requires a reproduced baseline.")
+
+    monkeypatch.setattr(module, "create_scoped_installation_token", token)
+    service = FixValidationService(
+        settings=_settings(),
+        browser_runner=BrowserRunner(),
+        workspace_parent=tmp_path,
+        materializer=materialize,
+        command_runner=failing_check,
+    )
+    monkeypatch.setattr(
+        service,
+        "_rerun_browser_when_supported",
+        must_not_replay,
+    )
+    context = _context().model_copy(
+        update={
+            "reproduction_before": "blocked",
+            "reproduction_plan": _browser_plan(),
+        }
+    )
+
+    result = await service.validate(context)
+
+    assert result.status == "validation_failed"
+    assert result.reproduction_after is None
+    assert result.checks[-1].status == "failed"
 
 
 @pytest.mark.anyio

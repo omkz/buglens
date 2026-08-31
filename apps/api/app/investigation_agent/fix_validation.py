@@ -137,7 +137,18 @@ class FixValidationService:
                     "validation_failed", "One or more bounded validation checks failed.", checks, context
                 )
 
-            after = await self._rerun_browser_when_supported(checkout, context, checks)
+            browser_verification_skipped = (
+                context.reproduction_before != "reproduced"
+            )
+            after = (
+                None
+                if browser_verification_skipped
+                else await self._rerun_browser_when_supported(
+                    checkout,
+                    context,
+                    checks,
+                )
+            )
             if after == "not_reproduced" and context.reproduction_before == "reproduced":
                 return _result(
                     "validated",
@@ -161,9 +172,17 @@ class FixValidationService:
                     after,
                 )
             if checks and all(check.status == "passed" for check in checks):
+                summary = (
+                    "All available bounded validation checks passed; browser fix "
+                    "verification was skipped because the original bug was not "
+                    "reproduced."
+                    if browser_verification_skipped
+                    else "All available bounded validation checks passed; browser "
+                    "reproduction was unavailable."
+                )
                 return _result(
                     "validated",
-                    "All available bounded validation checks passed; browser reproduction was unavailable.",
+                    summary,
                     checks,
                     context,
                     after,
@@ -217,6 +236,8 @@ class FixValidationService:
         context: FixValidationContext,
         checks: list[FixValidationCheck],
     ) -> str | None:
+        if context.reproduction_before != "reproduced":
+            return None
         plan = context.reproduction_plan
         next_bin = checkout / "node_modules" / ".bin" / "next"
         if plan is None or not next_bin.is_file():
