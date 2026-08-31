@@ -1282,6 +1282,99 @@ class _FakePlaywrightContext:
         return None
 
 
+class _CapturingLogger:
+    def __init__(self):
+        self.events = []
+
+    def warning(self, event, **fields):
+        self.events.append((event, fields))
+
+
+@pytest.mark.anyio
+async def test_runner_logs_safe_initial_navigation_failure(monkeypatch):
+    from app.investigation_agent.tools import playwright as playwright_module
+
+    diagnostic = "navigation failed for https://user:secret@example.test"
+
+    class NavigationFailureContext(_FakePlaywrightContext):
+        async def __aenter__(self):
+            playwright = await super().__aenter__()
+
+            async def fail_navigation(value):
+                raise RuntimeError(diagnostic)
+
+            self.browser.page.goto = fail_navigation
+            return playwright
+
+    async def public_resolver(hostname, port):
+        return ["93.184.216.34"]
+
+    captured = _CapturingLogger()
+    monkeypatch.setattr(playwright_module, "logger", captured)
+    runner = PlaywrightPlanRunner(
+        action_timeout_ms=100,
+        run_timeout_seconds=1,
+        playwright_factory=NavigationFailureContext,
+        resolver=public_resolver,
+    )
+    plan = BrowserTestPlan.model_validate(
+        {"name": "navigate", "actions": [{"type": "goto", "path": "/"}]}
+    )
+
+    result = await runner.run(plan, app_url="https://demo.example.com")
+
+    assert result.status == "blocked"
+    assert result.summary == (
+        "The browser run could not complete in the configured environment."
+    )
+    event, fields = captured.events[-1]
+    assert event == "browser_run_blocked"
+    assert fields["failure_stage"] == "initial_navigation"
+    assert fields["exception_type"] == "RuntimeError"
+    assert fields["exc_info"] is True
+    assert fields["safe_exc_info"] is True
+    assert "action_index" not in fields
+    assert diagnostic not in repr(fields)
+
+
+@pytest.mark.anyio
+async def test_runner_logs_run_timeout_separately(monkeypatch):
+    from app.investigation_agent.tools import playwright as playwright_module
+
+    class SlowPlaywrightContext:
+        async def __aenter__(self):
+            await asyncio.sleep(1)
+
+        async def __aexit__(self, *args):
+            return None
+
+    async def public_resolver(hostname, port):
+        return ["93.184.216.34"]
+
+    captured = _CapturingLogger()
+    monkeypatch.setattr(playwright_module, "logger", captured)
+    runner = PlaywrightPlanRunner(
+        action_timeout_ms=100,
+        run_timeout_seconds=0.001,
+        playwright_factory=SlowPlaywrightContext,
+        resolver=public_resolver,
+    )
+    plan = BrowserTestPlan.model_validate(
+        {"name": "timeout", "actions": [{"type": "goto", "path": "/"}]}
+    )
+
+    result = await runner.run(plan, app_url="https://demo.example.com")
+
+    assert result.status == "blocked"
+    assert result.summary == "The browser run timed out in the configured environment."
+    event, fields = captured.events[-1]
+    assert event == "browser_run_blocked"
+    assert fields["failure_stage"] == "run_timeout"
+    assert fields["exception_type"] == "TimeoutError"
+    assert fields["exc_info"] is True
+    assert fields["safe_exc_info"] is True
+
+
 @pytest.mark.anyio
 async def test_runner_reports_not_reproduced_reproduced_and_blocked():
     plan = BrowserTestPlan.model_validate(

@@ -15,13 +15,14 @@ from app.investigation_agent.fix_validation import (
     FixValidationContext,
     FixValidationResult,
     FixValidationService,
+    _browser_execution_check,
     _run_command,
 )
 from app.investigation_agent.repository import (
     FixValidationClaim,
     FixValidationClaimState,
 )
-from app.investigation_agent.schemas import FixProposal
+from app.investigation_agent.schemas import BrowserExecutionResult, FixProposal
 
 
 def _proposal(path: str = "src/checkout.ts", original: str = "old\n") -> FixProposal:
@@ -54,6 +55,31 @@ def _context(proposal: FixProposal | None = None) -> FixValidationContext:
 class BrowserRunner:
     async def run(self, *args, **kwargs):
         raise AssertionError("Browser validation should not run without a supported app.")
+
+
+@pytest.mark.parametrize(
+    ("browser_status", "check_status"),
+    [
+        ("blocked", "blocked"),
+        ("reproduced", "failed"),
+        ("not_reproduced", "passed"),
+    ],
+)
+def test_browser_execution_check_preserves_status_semantics(
+    browser_status, check_status
+):
+    execution = BrowserExecutionResult(
+        status=browser_status,
+        completed_actions=1,
+        failed_action_index=None,
+        expected=None,
+        actual=None,
+        summary="Bounded browser result.",
+    )
+
+    check = _browser_execution_check(execution)
+
+    assert check.status == check_status
 
 
 def _settings(
@@ -357,8 +383,20 @@ async def test_successful_install_then_failing_typecheck_reports_validation_fail
 
 
 @pytest.mark.anyio
-async def test_browser_still_reproducing_reports_validation_failed(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("browser_status", "check_status", "result_status"),
+    [
+        ("blocked", "blocked", "blocked"),
+        ("reproduced", "failed", "validation_failed"),
+        ("not_reproduced", "passed", "validated"),
+    ],
+)
+async def test_browser_result_preserves_overall_validation_semantics(
+    monkeypatch,
+    tmp_path,
+    browser_status,
+    check_status,
+    result_status,
 ):
     from app.investigation_agent import fix_validation as module
 
@@ -373,15 +411,15 @@ async def test_browser_still_reproducing_reports_validation_failed(
     async def passing_check(command, cwd, timeout):
         return FixValidationCheck(name="Pytest", status="passed", output="ok")
 
-    async def reproduced(checkout, context, checks):
+    async def browser_result(checkout, context, checks):
         checks.append(
             FixValidationCheck(
                 name="Browser reproduction",
-                status="failed",
-                output="The checkout bug was reproduced.",
+                status=check_status,
+                output="Bounded browser result.",
             )
         )
-        return "reproduced"
+        return browser_status
 
     monkeypatch.setattr(module, "create_scoped_installation_token", token)
     service = FixValidationService(
@@ -391,13 +429,13 @@ async def test_browser_still_reproducing_reports_validation_failed(
         materializer=materialize,
         command_runner=passing_check,
     )
-    monkeypatch.setattr(service, "_rerun_browser_when_supported", reproduced)
+    monkeypatch.setattr(service, "_rerun_browser_when_supported", browser_result)
 
     result = await service.validate(_context())
 
-    assert result.status == "validation_failed"
-    assert result.reproduction_after == "reproduced"
-    assert result.checks[-1].status == "failed"
+    assert result.status == result_status
+    assert result.reproduction_after == browser_status
+    assert result.checks[-1].status == check_status
 
 
 @pytest.mark.anyio

@@ -18,7 +18,7 @@ from app.config import Settings
 from app.integrations.github.access import create_scoped_installation_token
 
 from .fixes import is_forbidden_fix_path
-from .schemas import BrowserTestPlan, FixProposal
+from .schemas import BrowserExecutionResult, BrowserTestPlan, FixProposal
 from .tools.playwright import PlaywrightPlanRunner
 
 _MAX_OUTPUT = 20_000
@@ -150,6 +150,16 @@ class FixValidationService:
                 return _result(
                     "validation_failed", "The browser reproduction still reproduces the bug.", checks, context, after
                 )
+            if after == "blocked" or any(
+                check.status == "blocked" for check in checks
+            ):
+                return _result(
+                    "blocked",
+                    "Browser validation could not complete in the isolated environment.",
+                    checks,
+                    context,
+                    after,
+                )
             if checks and all(check.status == "passed" for check in checks):
                 return _result(
                     "validated",
@@ -224,7 +234,7 @@ class FixValidationService:
                 return None
             checks.append(FixValidationCheck(name="Start isolated application", status="passed", output="The isolated application became ready."))
             execution = await self.browser_runner.run(plan, app_url=f"http://127.0.0.1:{port}")
-            checks.append(FixValidationCheck(name="Browser reproduction", status="passed" if execution.status == "not_reproduced" else "failed", output=execution.summary[:_MAX_OUTPUT]))
+            checks.append(_browser_execution_check(execution))
             return execution.status
         finally:
             if process.returncode is None:
@@ -255,6 +265,21 @@ def _apply_proposal(checkout: Path, proposal: FixProposal) -> FixValidationCheck
     for target, content in resolved:
         target.write_text(content, encoding="utf-8")
     return None
+
+
+def _browser_execution_check(
+    execution: BrowserExecutionResult,
+) -> FixValidationCheck:
+    status = {
+        "not_reproduced": "passed",
+        "reproduced": "failed",
+        "blocked": "blocked",
+    }[execution.status]
+    return FixValidationCheck(
+        name="Browser reproduction",
+        status=status,
+        output=execution.summary[:_MAX_OUTPUT],
+    )
 
 
 async def _clone_repository(token: str, context: FixValidationContext, checkout: Path) -> None:

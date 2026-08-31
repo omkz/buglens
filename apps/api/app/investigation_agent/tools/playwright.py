@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+import structlog
 from playwright.async_api import Page, async_playwright, expect
 
 from ..schemas import (
@@ -25,6 +26,8 @@ from ..schemas import (
     PressAction,
     WaitForAction,
 )
+
+logger = structlog.get_logger(__name__)
 
 
 class UnsafeApplicationUrlError(ValueError):
@@ -257,16 +260,19 @@ class PlaywrightPlanRunner:
                 allow_private_network=self.allow_private_network,
                 resolver=self.resolver,
             )
-        except UnsafeApplicationUrlError:
+        except UnsafeApplicationUrlError as exc:
+            _log_browser_failure("validate_origin", exc)
             return _blocked(0, None, "The configured application URL is not safe.")
 
         browser = None
         completed = 0
         meaningful_actions = 0
+        failure_stage = "launch_browser"
         try:
             async with asyncio.timeout(self.run_timeout_seconds):
                 async with self.playwright_factory() as playwright:
                     browser = await playwright.chromium.launch(headless=True)
+                    failure_stage = "create_context"
                     browser_context = await browser.new_context(
                         service_workers="block"
                     )
@@ -279,8 +285,10 @@ class PlaywrightPlanRunner:
                     await browser_context.route_web_socket("**/*", _block_web_socket)
                     page = await browser_context.new_page()
                     page.set_default_timeout(self.action_timeout_ms)
+                    failure_stage = "initial_navigation"
                     await page.goto(origin + plan.start_path)
                     for index, action in enumerate(plan.actions):
+                        failure_stage = "execute_action"
                         try:
                             await self.execute_action(page, action, origin=origin)
                             completed += 1
@@ -307,7 +315,12 @@ class PlaywrightPlanRunner:
                                 actual=_bounded(getattr(page, "url", None)),
                                 summary="The reported failure was observed at a browser expectation.",
                             )
-                        except Exception:
+                        except Exception as exc:
+                            _log_browser_failure(
+                                "execute_action",
+                                exc,
+                                action_index=index,
+                            )
                             return _blocked(
                                 completed,
                                 index,
@@ -321,7 +334,15 @@ class PlaywrightPlanRunner:
                         actual=None,
                         summary="All planned browser expectations passed.",
                     )
-        except Exception:
+        except TimeoutError as exc:
+            _log_browser_failure("run_timeout", exc)
+            return _blocked(
+                completed,
+                None,
+                "The browser run timed out in the configured environment.",
+            )
+        except Exception as exc:
+            _log_browser_failure(failure_stage, exc)
             return _blocked(
                 completed,
                 None,
@@ -403,3 +424,20 @@ def _blocked(
         actual=None,
         summary=summary,
     )
+
+
+def _log_browser_failure(
+    failure_stage: str,
+    exc: BaseException,
+    *,
+    action_index: int | None = None,
+) -> None:
+    fields: dict[str, object] = {
+        "failure_stage": failure_stage,
+        "exception_type": type(exc).__name__,
+        "exc_info": True,
+        "safe_exc_info": True,
+    }
+    if action_index is not None:
+        fields["action_index"] = action_index
+    logger.warning("browser_run_blocked", **fields)
