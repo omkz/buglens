@@ -322,16 +322,17 @@ export default function InvestigationDetailPage() {
           : "Unable to load the investigation result.",
       );
     }
-    setState((current) => {
-      if (current.status !== "ready") return current;
-      if (
-        latestAgentRunAttemptRef.current !== expectedAttemptId ||
-        body.attempt_id !== expectedAttemptId
-      ) {
-        return current;
-      }
-      return { ...current, agentRun: body };
-    });
+    if (
+      latestAgentRunAttemptRef.current !== expectedAttemptId ||
+      body.attempt_id !== expectedAttemptId
+    ) {
+      return null;
+    }
+    setState((current) =>
+      current.status === "ready"
+        ? { ...current, agentRun: body }
+        : current,
+    );
     return body;
   }
 
@@ -355,6 +356,61 @@ export default function InvestigationDetailPage() {
       { withCredentials: true },
     );
     progressSourceRef.current = progressSource;
+    let attemptSettled = false;
+    let postFinished = false;
+
+    const closeProgressSource = () => {
+      if (progressSourceRef.current === progressSource) {
+        progressSourceRef.current = null;
+      }
+      progressSource.close();
+    };
+
+    const settleAttempt = (
+      agentRun: AgentRunStatus,
+      failureMessage = "Autonomous investigation failed. Please try again.",
+    ) => {
+      if (
+        attemptSettled ||
+        latestAgentRunAttemptRef.current !== attemptId ||
+        agentRun.attempt_id !== attemptId ||
+        (agentRun.status !== "completed" && agentRun.status !== "failed")
+      ) {
+        return false;
+      }
+      attemptSettled = true;
+      setState((current) =>
+        current.status === "ready"
+          ? { ...current, agentRun }
+          : current,
+      );
+      setInvestigationError(
+        agentRun.status === "completed" ? null : failureMessage,
+      );
+      setLiveProgressDisconnected(false);
+      closeProgressSource();
+      investigationRequestActiveRef.current = false;
+      setIsInvestigating(false);
+      return true;
+    };
+
+    const failAttempt = (error: unknown) => {
+      if (
+        attemptSettled ||
+        latestAgentRunAttemptRef.current !== attemptId
+      ) {
+        return;
+      }
+      attemptSettled = true;
+      closeProgressSource();
+      investigationRequestActiveRef.current = false;
+      setIsInvestigating(false);
+      setInvestigationError(
+        error instanceof Error
+          ? error.message
+          : "Autonomous investigation failed. Please try again.",
+      );
+    };
 
     const receiveProgress = (event: MessageEvent<string>) => {
       try {
@@ -362,6 +418,7 @@ export default function InvestigationDetailPage() {
           AgentRunProgress & { attempt_id: string }
         >;
         if (
+          attemptSettled ||
           progress.attempt_id !== attemptId ||
           latestAgentRunAttemptRef.current !== attemptId ||
           typeof progress.stage !== "string" ||
@@ -370,23 +427,34 @@ export default function InvestigationDetailPage() {
         ) {
           return false;
         }
+        setLiveProgressDisconnected(false);
         const stage = progress.stage;
         const message = progress.message;
-        setState((current) =>
-          current.status === "ready"
-            ? {
-                ...current,
-                agentRun: {
-                  ...current.agentRun,
-                  progress: {
-                    stage,
-                    message,
-                    updated_at: new Date().toISOString(),
-                  },
-                },
-              }
-            : current,
-        );
+        setState((current) => {
+          if (current.status !== "ready") return current;
+          const currentAttempt = current.agentRun.attempt_id === attemptId;
+          return {
+            ...current,
+            agentRun: {
+              investigation_id: current.agentRun.investigation_id,
+              attempt_id: attemptId,
+              status: "running",
+              result: currentAttempt ? current.agentRun.result : null,
+              progress: {
+                stage,
+                message,
+                updated_at: new Date().toISOString(),
+              },
+              github_issue_status: currentAttempt
+                ? current.agentRun.github_issue_status
+                : null,
+              github_issue: currentAttempt ? current.agentRun.github_issue : null,
+              fix_validation: currentAttempt
+                ? current.agentRun.fix_validation
+                : null,
+            },
+          };
+        });
         return true;
       } catch {
         // Ignore malformed transport data; the POST remains authoritative.
@@ -394,34 +462,28 @@ export default function InvestigationDetailPage() {
       }
     };
     progressSource.addEventListener("progress", receiveProgress);
-    progressSource.addEventListener("complete", (event) => {
+    const reconcileTerminalEvent = async (event: Event) => {
       const accepted = receiveProgress(event as MessageEvent<string>);
-      progressSource.close();
-      if (progressSourceRef.current === progressSource) {
-        progressSourceRef.current = null;
+      if (!accepted) return;
+      closeProgressSource();
+      try {
+        const persisted = await refreshAgentRunStatus(attemptId);
+        if (persisted) settleAttempt(persisted);
+      } catch {
+        if (postFinished && !attemptSettled) {
+          setLiveProgressDisconnected(true);
+        }
       }
-      if (accepted) {
-        void refreshAgentRunStatus(attemptId).catch(() => {
-          // The POST remains authoritative if reconciliation is unavailable.
-        });
-      }
-    });
-    progressSource.addEventListener("failed", (event) => {
-      const accepted = receiveProgress(event as MessageEvent<string>);
-      progressSource.close();
-      if (progressSourceRef.current === progressSource) {
-        progressSourceRef.current = null;
-      }
-      if (accepted) {
-        void refreshAgentRunStatus(attemptId).catch(() => {
-          // The POST remains authoritative if reconciliation is unavailable.
-        });
-      }
-    });
+    };
+    progressSource.addEventListener("complete", reconcileTerminalEvent);
+    progressSource.addEventListener("failed", reconcileTerminalEvent);
     progressSource.onerror = () => {
-      if (progressSourceRef.current === progressSource) {
-        progressSource.close();
-        progressSourceRef.current = null;
+      if (
+        progressSourceRef.current === progressSource &&
+        !attemptSettled
+      ) {
+        // Keep the native reconnect behavior so a transient disconnect cannot
+        // discard the persisted terminal event.
         setLiveProgressDisconnected(true);
       }
     };
@@ -447,38 +509,33 @@ export default function InvestigationDetailPage() {
             : "Autonomous investigation failed. Please try again.",
         );
       }
-      setState((current) =>
-        current.status === "ready" &&
-        latestAgentRunAttemptRef.current === attemptId &&
-        body.attempt_id === attemptId
-          ? { ...current, agentRun: body }
-          : current,
-      );
+      if (!settleAttempt(body)) {
+        throw new Error("Autonomous investigation returned an invalid state.");
+      }
     } catch (error) {
-      let reconciledCompleted = false;
+      if (attemptSettled) return;
       try {
         const reconciled = await refreshAgentRunStatus(attemptId);
-        reconciledCompleted =
-          latestAgentRunAttemptRef.current === attemptId &&
-          reconciled.attempt_id === attemptId &&
-          reconciled.status === "completed";
+        if (
+          reconciled &&
+          settleAttempt(
+            reconciled,
+            error instanceof Error ? error.message : undefined,
+          )
+        ) {
+          return;
+        }
+        if (reconciled?.status === "running") {
+          // The backend still owns this attempt; its terminal SSE event will
+          // reconcile the persisted result even though the POST transport ended.
+          return;
+        }
       } catch {
-        // A refresh reloads the persisted run state.
+        // The request error below remains authoritative when no run can be found.
       }
-      setInvestigationError(
-        reconciledCompleted
-          ? null
-          : error instanceof Error
-            ? error.message
-            : "Autonomous investigation failed. Please try again.",
-      );
+      failAttempt(error);
     } finally {
-      progressSource.close();
-      if (progressSourceRef.current === progressSource) {
-        progressSourceRef.current = null;
-      }
-      investigationRequestActiveRef.current = false;
-      setIsInvestigating(false);
+      postFinished = true;
     }
   }
 
