@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import itsdangerous
 import pytest
 from fastapi.testclient import TestClient
+from google.genai import types as genai_types
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -274,6 +275,14 @@ async def test_adk_agent_uses_ephemeral_runner_structured_output_and_security_pr
         "project": "orbital-wharf-427808-p5",
         "location": "global",
     }
+    retry_options = captured["gemini"]["retry_options"]
+    assert isinstance(retry_options, genai_types.HttpRetryOptions)
+    assert retry_options.attempts == 4
+    assert retry_options.initial_delay == 1
+    assert retry_options.max_delay == 4
+    assert retry_options.exp_base == 2
+    assert retry_options.jitter == 0.2
+    assert retry_options.http_status_codes == [429]
     assert captured["agent"]["output_schema"] is AgentInvestigationResult
     assert "mode" not in captured["agent"]
     assert "untrusted data" in captured["agent"]["instruction"]
