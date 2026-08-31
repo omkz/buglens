@@ -35,6 +35,8 @@ def test_database_pool_and_local_development_defaults(monkeypatch):
         "DATABASE_POOL_TIMEOUT_SECONDS",
         "DATABASE_POOL_RECYCLE_SECONDS",
         "EVIDENCE_STORAGE_BACKEND",
+        "FIX_VALIDATION_ALLOW_HOST_EXECUTION",
+        "FIX_VALIDATION_ALLOW_NETWORK_INSTALLS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -47,6 +49,8 @@ def test_database_pool_and_local_development_defaults(monkeypatch):
     assert settings.evidence_storage_backend == "local"
     assert str(settings.evidence_storage_dir) == ".data/evidence"
     assert settings.playwright_allow_private_network is False
+    assert settings.fix_validation_allow_host_execution is False
+    assert settings.fix_validation_allow_network_installs is False
     assert settings.frontend_base_url == "http://localhost:3000"
     assert settings.backend_base_url == "http://localhost:3000/api"
     assert (

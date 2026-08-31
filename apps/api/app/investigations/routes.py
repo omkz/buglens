@@ -45,6 +45,7 @@ from app.investigation_agent.github_issue import (
     build_github_issue,
 )
 from app.investigation_agent.fix_validation import (
+    FixValidationContext,
     FixValidationResult,
     FixValidationService,
 )
@@ -978,14 +979,61 @@ async def validate_investigation_fix(
         raise HTTPException(status_code=503, detail="Fix validation is temporarily unavailable.") from None
 
     if claim.context is None:
-        raise HTTPException(status_code=503, detail="Fix validation is temporarily unavailable.")
-    result = await validation_service.validate(claim.context)
+        logger.error(
+            "fix_validation_context_missing",
+            investigation_id=str(investigation_id),
+        )
+        result = _blocked_fix_validation_result(None)
+    else:
+        try:
+            result = await validation_service.validate(claim.context)
+        except Exception as exc:
+            logger.warning(
+                "fix_validation_execution_failed",
+                investigation_id=str(investigation_id),
+                exception_type=type(exc).__name__,
+                exc_info=True,
+                safe_exc_info=True,
+            )
+            result = _blocked_fix_validation_result(claim.context)
     try:
         run = await complete_fix_validation(db, investigation_id=investigation_id, result=result)
         await db.commit()
     except SQLAlchemyError:
         await db.rollback()
-        raise HTTPException(status_code=503, detail="Fix validation is temporarily unavailable.") from None
+        logger.exception(
+            "fix_validation_persistence_failed",
+            investigation_id=str(investigation_id),
+        )
+        run = await _best_effort_complete_fix_validation(
+            db,
+            investigation_id,
+            result,
+        )
+        if run is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Fix validation is temporarily unavailable.",
+            ) from None
+    except Exception as exc:
+        await db.rollback()
+        logger.warning(
+            "fix_validation_completion_failed",
+            investigation_id=str(investigation_id),
+            exception_type=type(exc).__name__,
+            exc_info=True,
+            safe_exc_info=True,
+        )
+        run = await _best_effort_complete_fix_validation(
+            db,
+            investigation_id,
+            _blocked_fix_validation_result(claim.context),
+        )
+        if run is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Fix validation is temporarily unavailable.",
+            ) from None
     return _agent_run_response(investigation_id, run)
 
 
@@ -1423,6 +1471,45 @@ async def _best_effort_mark_agent_run_failed(
             "agent_run_failure_status_update_failed",
             investigation_id=str(investigation_id),
         )
+
+
+def _blocked_fix_validation_result(
+    context: FixValidationContext | None,
+) -> FixValidationResult:
+    return FixValidationResult(
+        status="blocked",
+        summary="Fix validation could not complete safely.",
+        checks=[],
+        reproduction_before=(
+            context.reproduction_before if context is not None else None
+        ),
+        reproduction_after=None,
+    )
+
+
+async def _best_effort_complete_fix_validation(
+    db: AsyncSession,
+    investigation_id: uuid.UUID,
+    result: FixValidationResult,
+) -> PersistedAgentRun | None:
+    try:
+        run = await complete_fix_validation(
+            db,
+            investigation_id=investigation_id,
+            result=result,
+        )
+        await db.commit()
+        return run
+    except Exception as exc:
+        await db.rollback()
+        logger.warning(
+            "fix_validation_terminal_status_update_failed",
+            investigation_id=str(investigation_id),
+            exception_type=type(exc).__name__,
+            exc_info=True,
+            safe_exc_info=True,
+        )
+        return None
 
 
 async def _best_effort_mark_github_issue_failed(

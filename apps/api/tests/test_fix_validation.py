@@ -56,6 +56,15 @@ class BrowserRunner:
         raise AssertionError("Browser validation should not run without a supported app.")
 
 
+def _settings(
+    *, host_execution: bool = True, network_installs: bool = False
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        fix_validation_allow_host_execution=host_execution,
+        fix_validation_allow_network_installs=network_installs,
+    )
+
+
 @pytest.mark.anyio
 async def test_valid_proposal_applies_only_in_temp_workspace_and_cleans_up(
     monkeypatch, tmp_path
@@ -81,7 +90,7 @@ async def test_valid_proposal_applies_only_in_temp_workspace_and_cleans_up(
 
     monkeypatch.setattr(module, "create_scoped_installation_token", token)
     service = FixValidationService(
-        settings=SimpleNamespace(),
+        settings=_settings(),
         browser_runner=BrowserRunner(),
         workspace_parent=tmp_path,
         materializer=materialize,
@@ -112,7 +121,7 @@ async def test_source_mismatch_is_stale_and_applies_nothing(monkeypatch, tmp_pat
 
     monkeypatch.setattr(module, "create_scoped_installation_token", token)
     service = FixValidationService(
-        settings=SimpleNamespace(), browser_runner=BrowserRunner(),
+        settings=_settings(), browser_runner=BrowserRunner(),
         workspace_parent=tmp_path, materializer=materialize,
     )
 
@@ -138,7 +147,7 @@ async def test_path_traversal_is_blocked(monkeypatch, tmp_path):
 
     monkeypatch.setattr(module, "create_scoped_installation_token", token)
     service = FixValidationService(
-        settings=SimpleNamespace(), browser_runner=BrowserRunner(),
+        settings=_settings(), browser_runner=BrowserRunner(),
         workspace_parent=tmp_path, materializer=materialize,
     )
 
@@ -146,6 +155,39 @@ async def test_path_traversal_is_blocked(monkeypatch, tmp_path):
 
     assert result.status == "blocked"
     assert outside.read_text() == "old\n"
+
+
+@pytest.mark.anyio
+async def test_host_execution_disabled_blocks_runtime_validation(
+    monkeypatch, tmp_path
+):
+    from app.investigation_agent import fix_validation as module
+
+    async def token(**kwargs):
+        return "token"
+
+    async def materialize(value, context, checkout):
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "checkout.ts").write_text("old\n")
+        (checkout / "tests").mkdir()
+
+    async def must_not_execute(command, cwd, timeout):
+        raise AssertionError("Repository code must not run when host execution is off.")
+
+    monkeypatch.setattr(module, "create_scoped_installation_token", token)
+    service = FixValidationService(
+        settings=_settings(host_execution=False),
+        browser_runner=BrowserRunner(),
+        workspace_parent=tmp_path,
+        materializer=materialize,
+        command_runner=must_not_execute,
+    )
+
+    result = await service.validate(_context())
+
+    assert result.status == "blocked"
+    assert result.summary == "Runtime fix validation is disabled in this environment."
+    assert result.checks == []
 
 
 @pytest.mark.anyio
@@ -178,7 +220,7 @@ async def test_failed_bounded_check_reports_validation_failed(monkeypatch, tmp_p
 
     monkeypatch.setattr(module, "create_scoped_installation_token", token)
     service = FixValidationService(
-        settings=SimpleNamespace(), browser_runner=BrowserRunner(),
+        settings=_settings(), browser_runner=BrowserRunner(),
         workspace_parent=tmp_path, materializer=materialize, command_runner=fail,
     )
 
@@ -218,7 +260,7 @@ async def test_dependency_install_failure_reports_blocked(monkeypatch, tmp_path)
     monkeypatch.setattr(module, "create_scoped_installation_token", token)
     monkeypatch.setattr(module.shutil, "which", lambda command: f"/usr/bin/{command}")
     service = FixValidationService(
-        settings=SimpleNamespace(),
+        settings=_settings(),
         browser_runner=BrowserRunner(),
         workspace_parent=tmp_path,
         materializer=materialize,
@@ -230,6 +272,45 @@ async def test_dependency_install_failure_reports_blocked(monkeypatch, tmp_path)
     assert result.status == "blocked"
     assert result.checks[0].name == "Install dependencies without lifecycle scripts"
     assert result.checks[0].status == "failed"
+
+
+@pytest.mark.anyio
+async def test_network_enabled_install_omits_offline_flag(monkeypatch, tmp_path):
+    from app.investigation_agent import fix_validation as module
+
+    captured: list[str] = []
+
+    async def token(**kwargs):
+        return "token"
+
+    async def materialize(value, context, checkout):
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "checkout.ts").write_text("old\n")
+        (checkout / "package.json").write_text("{}\n")
+        (checkout / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+
+    async def install(command, cwd, timeout):
+        captured.extend(command)
+        return FixValidationCheck(name="pnpm", status="passed", output="ok")
+
+    monkeypatch.setattr(module, "create_scoped_installation_token", token)
+    monkeypatch.setattr(module.shutil, "which", lambda command: f"/usr/bin/{command}")
+    service = FixValidationService(
+        settings=_settings(network_installs=True),
+        browser_runner=BrowserRunner(),
+        workspace_parent=tmp_path,
+        materializer=materialize,
+        command_runner=install,
+    )
+
+    await service.validate(_context())
+
+    assert captured == [
+        "pnpm",
+        "install",
+        "--frozen-lockfile",
+        "--ignore-scripts",
+    ]
 
 
 @pytest.mark.anyio
@@ -261,7 +342,7 @@ async def test_successful_install_then_failing_typecheck_reports_validation_fail
     monkeypatch.setattr(module, "create_scoped_installation_token", token)
     monkeypatch.setattr(module.shutil, "which", lambda command: f"/usr/bin/{command}")
     service = FixValidationService(
-        settings=SimpleNamespace(),
+        settings=_settings(),
         browser_runner=BrowserRunner(),
         workspace_parent=tmp_path,
         materializer=materialize,
@@ -304,7 +385,7 @@ async def test_browser_still_reproducing_reports_validation_failed(
 
     monkeypatch.setattr(module, "create_scoped_installation_token", token)
     service = FixValidationService(
-        settings=SimpleNamespace(),
+        settings=_settings(),
         browser_runner=BrowserRunner(),
         workspace_parent=tmp_path,
         materializer=materialize,
@@ -359,3 +440,67 @@ async def test_fix_validation_route_is_scoped_and_protects_preconditions(
 
     assert exc_info.value.status_code == status_code
     assert captured["installation_id"] == installation_id
+
+
+@pytest.mark.anyio
+async def test_unexpected_post_claim_failure_persists_terminal_blocked_result(
+    monkeypatch,
+):
+    from app.investigations import routes
+
+    investigation_id = uuid.uuid4()
+    installation_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    async def connection(request, db):
+        return SimpleNamespace(
+            installation_id=installation_id,
+            github_installation_id=987654,
+        )
+
+    async def claim(db, **kwargs):
+        return FixValidationClaim(
+            state=FixValidationClaimState.READY,
+            context=_context(),
+        )
+
+    async def complete(db, **kwargs):
+        captured["persisted_result"] = kwargs["result"]
+        return SimpleNamespace()
+
+    class ValidationService:
+        async def validate(self, context):
+            raise RuntimeError("unexpected local validation failure")
+
+    class Db:
+        commits = 0
+
+        async def commit(self):
+            self.commits += 1
+
+        async def rollback(self):
+            return None
+
+    db = Db()
+    monkeypatch.setattr(routes, "_require_connection", connection)
+    monkeypatch.setattr(routes, "claim_fix_validation", claim)
+    monkeypatch.setattr(routes, "complete_fix_validation", complete)
+    monkeypatch.setattr(
+        routes,
+        "_agent_run_response",
+        lambda investigation_id, run: captured["persisted_result"],
+    )
+
+    response = await routes.validate_investigation_fix(
+        investigation_id,
+        SimpleNamespace(),
+        ValidationService(),
+        db,
+    )
+
+    assert db.commits == 2
+    assert isinstance(response, FixValidationResult)
+    assert response.status == "blocked"
+    assert response.summary == "Fix validation could not complete safely."
+    assert response.reproduction_before == "reproduced"
+    assert captured["persisted_result"] == response

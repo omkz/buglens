@@ -108,6 +108,14 @@ class FixValidationService:
                 )
                 return _result(status, apply_result.output, checks, context)
 
+            if not self.settings.fix_validation_allow_host_execution:
+                return _result(
+                    "blocked",
+                    "Runtime fix validation is disabled in this environment.",
+                    checks,
+                    context,
+                )
+
             checks.extend(await self._run_known_checks(checkout))
             dependency_install = next(
                 (
@@ -169,10 +177,12 @@ class FixValidationService:
         if package_json.is_file():
             manager: list[str] | None = None
             if (checkout / "pnpm-lock.yaml").is_file() and shutil.which("pnpm"):
-                manager = ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--offline"]
+                manager = ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"]
             elif (checkout / "package-lock.json").is_file() and shutil.which("npm"):
-                manager = ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--offline"]
+                manager = ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]
             if manager is not None:
+                if not self.settings.fix_validation_allow_network_installs:
+                    manager.append("--offline")
                 install = await self.command_runner(manager, checkout, _COMMAND_TIMEOUT)
                 install.name = _DEPENDENCY_INSTALL_CHECK
                 checks.append(install)
