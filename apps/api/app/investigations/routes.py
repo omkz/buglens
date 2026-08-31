@@ -44,6 +44,12 @@ from app.investigation_agent.github_issue import (
     GitHubIssuePublisher,
     build_github_issue,
 )
+from app.investigation_agent.pull_request import (
+    PullRequestConflictError,
+    PullRequestPublisher,
+    PullRequestStaleError,
+    build_pull_request,
+)
 from app.investigation_agent.fix_validation import (
     FixValidationContext,
     FixValidationResult,
@@ -54,16 +60,21 @@ from app.investigation_agent.repository import (
     AgentRunClaimState,
     FixValidationClaimState,
     GitHubIssueClaimState,
+    PullRequestClaimState,
     PersistedAgentRun,
     PublishedGitHubIssue,
+    PublishedPullRequest,
     claim_agent_run,
     claim_fix_validation,
     claim_github_issue_publication,
+    claim_pull_request_publication,
     complete_github_issue_publication,
+    complete_pull_request_publication,
     complete_agent_run,
     complete_fix_validation,
     get_agent_run as load_agent_run,
     mark_github_issue_publication_failed,
+    mark_pull_request_publication_terminal,
     mark_agent_run_failed,
     update_agent_run_progress,
 )
@@ -211,6 +222,13 @@ class RunAgentInvestigationRequest(BaseModel):
     attempt_id: uuid.UUID
 
 
+class PullRequestResponse(BaseModel):
+    number: int
+    title: str
+    url: str
+    branch: str
+
+
 class AgentRunStatusResponse(BaseModel):
     investigation_id: uuid.UUID
     attempt_id: uuid.UUID | None
@@ -219,12 +237,19 @@ class AgentRunStatusResponse(BaseModel):
     progress: AgentRunProgressResponse | None
     github_issue_status: models.GitHubIssuePublicationStatus | None
     github_issue: GitHubIssueResponse | None
+    pull_request_status: models.PullRequestPublicationStatus | None
+    pull_request: PullRequestResponse | None
     fix_validation: FixValidationResult | None
 
 
 class GitHubIssuePublicationResponse(BaseModel):
     status: Literal["created"]
     issue: GitHubIssueResponse
+
+
+class PullRequestPublicationResponse(BaseModel):
+    status: Literal["created"]
+    pull_request: PullRequestResponse
 
 
 def get_evidence_storage(
@@ -284,6 +309,12 @@ def get_github_issue_publisher(
     settings: Settings = Depends(get_settings),
 ) -> GitHubIssuePublisher:
     return GitHubIssuePublisher(settings)
+
+
+def get_pull_request_publisher(
+    settings: Settings = Depends(get_settings),
+) -> PullRequestPublisher:
+    return PullRequestPublisher(settings)
 
 
 @router.post(
@@ -1194,6 +1225,186 @@ async def create_investigation_github_issue(
     return _github_issue_publication_response(issue)
 
 
+@router.post(
+    "/investigations/{investigation_id}/pull-request",
+    response_model=PullRequestPublicationResponse,
+)
+async def create_investigation_pull_request(
+    investigation_id: uuid.UUID,
+    request: Request,
+    publisher: PullRequestPublisher = Depends(get_pull_request_publisher),
+    db: AsyncSession = Depends(get_db),
+) -> PullRequestPublicationResponse:
+    """Publish the persisted trusted proposal only after an explicit request."""
+    connection = await _require_connection(request, db)
+    try:
+        claim = await claim_pull_request_publication(
+            db,
+            installation_id=connection.installation_id,
+            investigation_id=investigation_id,
+        )
+        if claim.state == PullRequestClaimState.NOT_FOUND:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail="Investigation not found.")
+        if claim.state == PullRequestClaimState.NO_COMPLETED_RUN:
+            await db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail="Complete the autonomous investigation before creating a pull request.",
+            )
+        if claim.state == PullRequestClaimState.NO_FIX_PROPOSAL:
+            await db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail="No persisted fix proposal is available.",
+            )
+        if claim.state == PullRequestClaimState.CONFLICT:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Pull request creation is already in progress.",
+            )
+        if claim.state == PullRequestClaimState.CREATED:
+            await db.rollback()
+            if claim.pull_request is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Pull request publication is temporarily unavailable.",
+                )
+            return _pull_request_publication_response(claim.pull_request)
+        await db.commit()
+    except HTTPException:
+        raise
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "pull_request_claim_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Pull request publication is temporarily unavailable.",
+        ) from None
+
+    if claim.context is None:
+        await _best_effort_mark_pull_request_terminal(
+            db,
+            investigation_id,
+            models.PullRequestPublicationStatus.FAILED,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Pull request publication is temporarily unavailable.",
+        )
+
+    try:
+        draft = build_pull_request(claim.context)
+        created = await publisher.publish(claim.context, draft)
+    except PullRequestStaleError:
+        await _best_effort_mark_pull_request_terminal(
+            db,
+            investigation_id,
+            models.PullRequestPublicationStatus.STALE,
+        )
+        logger.info(
+            "pull_request_proposal_stale",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="The proposed fix is stale because a proposed file has changed.",
+        ) from None
+    except PullRequestConflictError:
+        await _best_effort_mark_pull_request_terminal(
+            db,
+            investigation_id,
+            models.PullRequestPublicationStatus.FAILED,
+        )
+        logger.warning(
+            "pull_request_branch_conflict",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="The Buglensa pull request branch already exists and could not be safely reconciled.",
+        ) from None
+    except (github_client.GitHubAPIError, httpx.HTTPError) as exc:
+        await _best_effort_mark_pull_request_terminal(
+            db,
+            investigation_id,
+            models.PullRequestPublicationStatus.FAILED,
+        )
+        logger.warning(
+            "pull_request_publish_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+            exception_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Pull request creation failed. Please try again.",
+        ) from None
+    except Exception as exc:
+        await _best_effort_mark_pull_request_terminal(
+            db,
+            investigation_id,
+            models.PullRequestPublicationStatus.FAILED,
+        )
+        logger.error(
+            "pull_request_publish_unexpected_failure",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+            exception_type=type(exc).__name__,
+            exc_info=True,
+            safe_exc_info=True,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Pull request creation failed. Please try again.",
+        ) from None
+
+    pull_request = PublishedPullRequest(
+        number=created.number,
+        title=created.title,
+        url=created.html_url,
+        branch=created.head_branch,
+    )
+    try:
+        await complete_pull_request_publication(
+            db,
+            investigation_id=investigation_id,
+            pull_request=pull_request,
+        )
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        await _best_effort_mark_pull_request_terminal(
+            db,
+            investigation_id,
+            models.PullRequestPublicationStatus.FAILED,
+        )
+        logger.exception(
+            "pull_request_persistence_failed",
+            investigation_id=str(investigation_id),
+            installation_id=connection.github_installation_id,
+            pull_request_number=pull_request.number,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Pull request publication is temporarily unavailable.",
+        ) from None
+    logger.info(
+        "pull_request_created",
+        investigation_id=str(investigation_id),
+        installation_id=connection.github_installation_id,
+        pull_request_number=pull_request.number,
+    )
+    return _pull_request_publication_response(pull_request)
+
+
 def _agent_run_response(
     investigation_id: uuid.UUID,
     run: PersistedAgentRun | None,
@@ -1207,6 +1418,8 @@ def _agent_run_response(
             progress=None,
             github_issue_status=None,
             github_issue=None,
+            pull_request_status=None,
+            pull_request=None,
             fix_validation=None,
         )
     result = None
@@ -1297,6 +1510,26 @@ def _agent_run_response(
             and run.github_issue_number is not None
             and run.github_issue_title is not None
             and run.github_issue_url is not None
+            else None
+        ),
+        pull_request_status=(
+            models.PullRequestPublicationStatus(run.pull_request_status)
+            if run.pull_request_status is not None
+            else None
+        ),
+        pull_request=(
+            PullRequestResponse(
+                number=run.pull_request_number,
+                title=run.pull_request_title,
+                url=run.pull_request_url,
+                branch=run.pull_request_branch,
+            )
+            if run.pull_request_status
+            == models.PullRequestPublicationStatus.CREATED.value
+            and run.pull_request_number is not None
+            and run.pull_request_title is not None
+            and run.pull_request_url is not None
+            and run.pull_request_branch is not None
             else None
         ),
         fix_validation=(
@@ -1429,6 +1662,20 @@ def _github_issue_publication_response(
     )
 
 
+def _pull_request_publication_response(
+    pull_request: PublishedPullRequest,
+) -> PullRequestPublicationResponse:
+    return PullRequestPublicationResponse(
+        status="created",
+        pull_request=PullRequestResponse(
+            number=pull_request.number,
+            title=pull_request.title,
+            url=pull_request.url,
+            branch=pull_request.branch,
+        ),
+    )
+
+
 def _analysis_response(
     investigation_id: uuid.UUID,
     investigation_status: models.InvestigationStatus,
@@ -1524,6 +1771,26 @@ async def _best_effort_mark_github_issue_failed(
         await db.rollback()
         logger.exception(
             "github_issue_failure_status_update_failed",
+            investigation_id=str(investigation_id),
+        )
+
+
+async def _best_effort_mark_pull_request_terminal(
+    db: AsyncSession,
+    investigation_id: uuid.UUID,
+    status: models.PullRequestPublicationStatus,
+) -> None:
+    try:
+        await mark_pull_request_publication_terminal(
+            db,
+            investigation_id=investigation_id,
+            status=status,
+        )
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "pull_request_terminal_status_update_failed",
             investigation_id=str(investigation_id),
         )
 

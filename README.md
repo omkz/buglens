@@ -115,14 +115,16 @@ to port 8000.
 
 ## GitHub App permissions
 
-- Metadata: read
-- Contents: read
-- Issues: read/write
+- Metadata: Read-only
+- Contents: Read and write
+- Issues: Read and write
+- Pull requests: Read and write
 
 ## Safety and boundaries
 
 - The model does not receive arbitrary shell execution.
 - Browser reproduction uses a constrained action DSL.
 - Production browser execution blocks private-network targets.
-- GitHub issue creation requires explicit user action.
-- Generate Fix and automatic pull requests are not part of the current core flow.
+- GitHub issue and pull request creation require explicit user action.
+- Buglensa creates fix pull requests on investigation-scoped branches and never
+  updates the repository default branch directly.

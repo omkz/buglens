@@ -4,12 +4,12 @@ import asyncio
 import json
 import uuid
 from base64 import b64encode
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 import itsdangerous
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import NoResultFound, SQLAlchemyError
 
 from app.config import get_settings
@@ -22,13 +22,18 @@ from app.integrations.github.repository import (
 from app.investigation_agent.repository import (
     AgentRunClaimState,
     GitHubIssueClaimState,
+    PullRequestClaimState,
     PublishedGitHubIssue,
+    PublishedPullRequest,
     claim_agent_run,
     claim_github_issue_publication,
+    claim_pull_request_publication,
     complete_github_issue_publication,
+    complete_pull_request_publication,
     complete_agent_run,
     get_agent_run,
     mark_github_issue_publication_failed,
+    mark_pull_request_publication_terminal,
     mark_agent_run_failed,
     update_agent_run_progress,
 )
@@ -699,7 +704,17 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                         duplicate_candidates=[],
                         reproduction_plan=None,
                         cannot_reproduce_reason="No app URL configured.",
-                        cannot_propose_fix_reason="No safe fix was proposed.",
+                        fix_proposal={
+                            "summary": "Correct checkout navigation.",
+                            "files": [
+                                {
+                                    "path": "src/checkout.ts",
+                                    "original_content": "const route = '/cart';\n",
+                                    "updated_content": "const route = '/checkout';\n",
+                                    "explanation": "Use the checkout route.",
+                                }
+                            ],
+                        },
                     ),
                     generated_test=None,
                     execution=None,
@@ -787,6 +802,90 @@ def test_repository_scope_default_status_and_project_delete_cascade():
                 )
                 assert refreshed_run.run is not None
                 assert refreshed_run.run.github_issue_url == published_issue.url
+
+                inaccessible_pr = await claim_pull_request_publication(
+                    db,
+                    installation_id=second_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert inaccessible_pr.state == PullRequestClaimState.NOT_FOUND
+
+                pr_claim = await claim_pull_request_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert pr_claim.state == PullRequestClaimState.READY
+                assert pr_claim.context is not None
+                assert pr_claim.context.fix_validation is None
+                assert pr_claim.context.repository_full_name == "first-org/first-repo"
+                await db.commit()
+
+                concurrent_pr = await claim_pull_request_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert concurrent_pr.state == PullRequestClaimState.CONFLICT
+                await db.rollback()
+
+                await db.execute(
+                    update(models.InvestigationAgentRun)
+                    .where(
+                        models.InvestigationAgentRun.investigation_id
+                        == first_investigation.id
+                    )
+                    .values(
+                        pull_request_publish_started_at=datetime.now(timezone.utc)
+                        - timedelta(minutes=6)
+                    )
+                )
+                await db.commit()
+                stale_pr = await claim_pull_request_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert stale_pr.state == PullRequestClaimState.READY
+                await db.commit()
+
+                await mark_pull_request_publication_terminal(
+                    db,
+                    investigation_id=first_investigation.id,
+                    status=models.PullRequestPublicationStatus.FAILED,
+                )
+                await db.commit()
+                retry_pr = await claim_pull_request_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert retry_pr.state == PullRequestClaimState.READY
+                await db.commit()
+
+                published_pr = PublishedPullRequest(
+                    number=42,
+                    title="Fix: Checkout is unresponsive",
+                    url="https://github.com/first-org/first-repo/pull/42",
+                    branch=f"buglensa/fix-{first_investigation.id.hex[:12]}",
+                )
+                pr_run = await complete_pull_request_publication(
+                    db,
+                    investigation_id=first_investigation.id,
+                    pull_request=published_pr,
+                )
+                await db.commit()
+                assert pr_run.pull_request_status == "created"
+                assert pr_run.pull_request_number == 42
+
+                existing_pr = await claim_pull_request_publication(
+                    db,
+                    installation_id=first_connection.installation_id,
+                    investigation_id=first_investigation.id,
+                )
+                assert existing_pr.state == PullRequestClaimState.CREATED
+                assert existing_pr.pull_request == published_pr
+                await db.rollback()
 
                 visible = await list_investigations(
                     db, installation_id=first_connection.installation_id

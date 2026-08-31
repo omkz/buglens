@@ -428,6 +428,7 @@ def test_alembic_head_migration_chain_includes_the_hardening_revisions():
     assert "b0f1c2d3e4f5" in revisions  # scope progress to one run attempt
     assert "c1d2e3f4a5b6" in revisions  # persist structured fix proposals
     assert "d2e3f4a5b6c7" in revisions  # persist isolated fix validation results
+    assert "e3f4a5b6c7d8" in revisions  # persist pull request publication
 
 
 def test_agent_run_progress_schema_and_migration_are_constrained_and_reversible():
@@ -621,6 +622,22 @@ def test_github_issue_publication_migration_is_linear_and_reversible():
     assert 'op.drop_column("investigation_agent_runs", "github_issue_status")' in migration_source
 
 
+def test_pull_request_publication_migration_is_linear_and_reversible():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(ALEMBIC_INI))
+    script = ScriptDirectory.from_config(config)
+    revision = script.get_revision("e3f4a5b6c7d8")
+    migration_source = Path(revision.path).read_text()
+
+    assert revision.down_revision == "d2e3f4a5b6c7"
+    assert 'sa.Column("pull_request_status"' in migration_source
+    assert 'sa.Column("pull_request_number", sa.BigInteger()' in migration_source
+    assert '"ck_investigation_agent_runs_pull_request_status"' in migration_source
+    assert 'op.drop_column("investigation_agent_runs", "pull_request_status")' in migration_source
+
+
 def test_agent_run_model_has_one_current_run_and_safe_status_constraints():
     table = Base.metadata.tables["investigation_agent_runs"]
 
@@ -635,6 +652,9 @@ def test_agent_run_model_has_one_current_run_and_safe_status_constraints():
     assert table.c.github_issue_created_at.type.timezone is True
     assert table.c.github_issue_publish_started_at.type.timezone is True
     assert isinstance(table.c.github_issue_number.type, BigInteger)
+    assert table.c.pull_request_created_at.type.timezone is True
+    assert table.c.pull_request_publish_started_at.type.timezone is True
+    assert isinstance(table.c.pull_request_number.type, BigInteger)
     assert list(table.c.investigation_id.foreign_keys)[0].ondelete == "CASCADE"
 
     unique_names = {
@@ -650,6 +670,7 @@ def test_agent_run_model_has_one_current_run_and_safe_status_constraints():
     assert "uq_investigation_agent_runs_investigation_id" in unique_names
     assert "ck_investigation_agent_runs_status" in check_names
     assert "ck_investigation_agent_runs_github_issue_status" in check_names
+    assert "ck_investigation_agent_runs_pull_request_status" in check_names
     assert "ck_investigation_agent_runs_reproduction_status" in check_names
 
 

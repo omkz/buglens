@@ -289,6 +289,13 @@ class GitHubIssuePublicationStatus(StrEnum):
     FAILED = "failed"
 
 
+class PullRequestPublicationStatus(StrEnum):
+    CREATING = "creating"
+    CREATED = "created"
+    FAILED = "failed"
+    STALE = "stale"
+
+
 class AgentRunProgressStage(StrEnum):
     STARTING = "starting"
     INVESTIGATING_REPOSITORY = "investigating_repository"
@@ -326,6 +333,11 @@ class InvestigationAgentRun(Base):
             "github_issue_status IS NULL OR github_issue_status IN "
             "('creating', 'created', 'failed')",
             name="ck_investigation_agent_runs_github_issue_status",
+        ),
+        CheckConstraint(
+            "pull_request_status IS NULL OR pull_request_status IN "
+            "('creating', 'created', 'failed', 'stale')",
+            name="ck_investigation_agent_runs_pull_request_status",
         ),
         CheckConstraint(
             "progress_stage IS NULL OR progress_stage IN "
@@ -370,6 +382,13 @@ class InvestigationAgentRun(Base):
     github_issue_url: Mapped[str | None]
     github_issue_created_at: Mapped[datetime | None]
     github_issue_publish_started_at: Mapped[datetime | None]
+    pull_request_status: Mapped[str | None]
+    pull_request_number: Mapped[int | None] = mapped_column(BigInteger)
+    pull_request_title: Mapped[str | None]
+    pull_request_url: Mapped[str | None]
+    pull_request_branch: Mapped[str | None]
+    pull_request_created_at: Mapped[datetime | None]
+    pull_request_publish_started_at: Mapped[datetime | None]
     progress_stage: Mapped[str | None]
     progress_message: Mapped[str | None] = mapped_column(Text)
     progress_updated_at: Mapped[datetime | None]

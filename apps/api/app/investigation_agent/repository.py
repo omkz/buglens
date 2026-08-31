@@ -92,6 +92,11 @@ class PersistedAgentRun:
     fix_validation_status: str | None = None
     fix_validation_result: dict | None = None
     fix_validation_started_at: datetime | None = None
+    pull_request_status: str | None = None
+    pull_request_number: int | None = None
+    pull_request_title: str | None = None
+    pull_request_url: str | None = None
+    pull_request_branch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,41 @@ class GitHubIssueClaim:
     state: GitHubIssueClaimState
     context: GitHubIssuePublicationContext | None = None
     issue: PublishedGitHubIssue | None = None
+
+
+@dataclass(frozen=True)
+class PublishedPullRequest:
+    number: int
+    title: str
+    url: str
+    branch: str
+
+
+class PullRequestClaimState(StrEnum):
+    READY = "ready"
+    CREATED = "created"
+    NOT_FOUND = "not_found"
+    NO_COMPLETED_RUN = "no_completed_run"
+    NO_FIX_PROPOSAL = "no_fix_proposal"
+    CONFLICT = "conflict"
+
+
+@dataclass(frozen=True)
+class PullRequestPublicationContext:
+    investigation_id: uuid.UUID
+    github_installation_id: int
+    repository_full_name: str
+    default_branch: str
+    investigation_title: str
+    fix_proposal: FixProposal
+    fix_validation: FixValidationResult | None
+
+
+@dataclass(frozen=True)
+class PullRequestClaim:
+    state: PullRequestClaimState
+    context: PullRequestPublicationContext | None = None
+    pull_request: PublishedPullRequest | None = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +256,13 @@ async def claim_agent_run(
             github_issue_url=None,
             github_issue_created_at=None,
             github_issue_publish_started_at=None,
+            pull_request_status=None,
+            pull_request_number=None,
+            pull_request_title=None,
+            pull_request_url=None,
+            pull_request_branch=None,
+            pull_request_created_at=None,
+            pull_request_publish_started_at=None,
             progress_stage=models.AgentRunProgressStage.STARTING.value,
             progress_message="Starting investigation…",
             progress_updated_at=started_at,
@@ -246,6 +293,13 @@ async def claim_agent_run(
         run.github_issue_url = None
         run.github_issue_created_at = None
         run.github_issue_publish_started_at = None
+        run.pull_request_status = None
+        run.pull_request_number = None
+        run.pull_request_title = None
+        run.pull_request_url = None
+        run.pull_request_branch = None
+        run.pull_request_created_at = None
+        run.pull_request_publish_started_at = None
         run.progress_stage = models.AgentRunProgressStage.STARTING.value
         run.progress_message = "Starting investigation…"
         run.progress_updated_at = started_at
@@ -610,6 +664,154 @@ async def mark_github_issue_publication_failed(
         run.github_issue_status = models.GitHubIssuePublicationStatus.FAILED.value
 
 
+async def claim_pull_request_publication(
+    db: AsyncSession,
+    *,
+    installation_id: uuid.UUID,
+    investigation_id: uuid.UUID,
+) -> PullRequestClaim:
+    """Authorize and atomically claim explicit pull-request publication."""
+    row = (
+        await db.execute(
+            select(
+                models.Investigation,
+                models.Project,
+                models.GitHubInstallation,
+            )
+            .join(models.Project, models.Investigation.project_id == models.Project.id)
+            .join(
+                models.GitHubInstallation,
+                models.Project.github_installation_id == models.GitHubInstallation.id,
+            )
+            .where(
+                models.Investigation.id == investigation_id,
+                models.Project.github_installation_id == installation_id,
+            )
+            .with_for_update(of=models.Investigation)
+        )
+    ).first()
+    if row is None:
+        return PullRequestClaim(state=PullRequestClaimState.NOT_FOUND)
+
+    investigation, project, installation = row
+    run = (
+        await db.execute(
+            select(models.InvestigationAgentRun)
+            .where(models.InvestigationAgentRun.investigation_id == investigation_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if run is None or run.status != models.AgentRunStatus.COMPLETED.value:
+        return PullRequestClaim(state=PullRequestClaimState.NO_COMPLETED_RUN)
+    if run.fix_proposal is None:
+        return PullRequestClaim(state=PullRequestClaimState.NO_FIX_PROPOSAL)
+
+    if (
+        run.pull_request_status
+        == models.PullRequestPublicationStatus.CREATED.value
+        and run.pull_request_number is not None
+        and run.pull_request_title is not None
+        and run.pull_request_url is not None
+        and run.pull_request_branch is not None
+    ):
+        return PullRequestClaim(
+            state=PullRequestClaimState.CREATED,
+            pull_request=PublishedPullRequest(
+                number=run.pull_request_number,
+                title=run.pull_request_title,
+                url=run.pull_request_url,
+                branch=run.pull_request_branch,
+            ),
+        )
+
+    now = datetime.now(UTC)
+    if (
+        run.pull_request_status
+        == models.PullRequestPublicationStatus.CREATING.value
+        and run.pull_request_publish_started_at is not None
+        and run.pull_request_publish_started_at > now - _PUBLICATION_STALE_AFTER
+    ):
+        return PullRequestClaim(state=PullRequestClaimState.CONFLICT)
+
+    run.pull_request_status = models.PullRequestPublicationStatus.CREATING.value
+    run.pull_request_number = None
+    run.pull_request_title = None
+    run.pull_request_url = None
+    run.pull_request_branch = None
+    run.pull_request_created_at = None
+    run.pull_request_publish_started_at = now
+    await db.flush()
+    return PullRequestClaim(
+        state=PullRequestClaimState.READY,
+        context=PullRequestPublicationContext(
+            investigation_id=investigation.id,
+            github_installation_id=installation.github_installation_id,
+            repository_full_name=project.github_repository_full_name,
+            default_branch=project.default_branch,
+            investigation_title=investigation.title,
+            fix_proposal=FixProposal.model_validate(run.fix_proposal),
+            fix_validation=(
+                FixValidationResult.model_validate(run.fix_validation_result)
+                if run.fix_validation_result is not None
+                else None
+            ),
+        ),
+    )
+
+
+async def complete_pull_request_publication(
+    db: AsyncSession,
+    *,
+    investigation_id: uuid.UUID,
+    pull_request: PublishedPullRequest,
+) -> PersistedAgentRun:
+    run = (
+        await db.execute(
+            select(models.InvestigationAgentRun)
+            .where(
+                models.InvestigationAgentRun.investigation_id == investigation_id,
+                models.InvestigationAgentRun.pull_request_status
+                == models.PullRequestPublicationStatus.CREATING.value,
+            )
+            .with_for_update()
+        )
+    ).scalar_one()
+    run.pull_request_status = models.PullRequestPublicationStatus.CREATED.value
+    run.pull_request_number = pull_request.number
+    run.pull_request_title = pull_request.title
+    run.pull_request_url = pull_request.url
+    run.pull_request_branch = pull_request.branch
+    run.pull_request_created_at = datetime.now(UTC)
+    await db.flush()
+    return _to_persisted(run)
+
+
+async def mark_pull_request_publication_terminal(
+    db: AsyncSession,
+    *,
+    investigation_id: uuid.UUID,
+    status: models.PullRequestPublicationStatus,
+) -> None:
+    if status not in {
+        models.PullRequestPublicationStatus.FAILED,
+        models.PullRequestPublicationStatus.STALE,
+    }:
+        raise ValueError("Pull request terminal failure status is invalid.")
+    run = (
+        await db.execute(
+            select(models.InvestigationAgentRun)
+            .where(
+                models.InvestigationAgentRun.investigation_id == investigation_id,
+                models.InvestigationAgentRun.pull_request_status
+                == models.PullRequestPublicationStatus.CREATING.value,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if run is not None:
+        run.pull_request_status = status.value
+
+
 def _to_persisted(run: models.InvestigationAgentRun) -> PersistedAgentRun:
     return PersistedAgentRun(
         id=run.id,
@@ -623,6 +825,11 @@ def _to_persisted(run: models.InvestigationAgentRun) -> PersistedAgentRun:
         fix_validation_status=run.fix_validation_status,
         fix_validation_result=run.fix_validation_result,
         fix_validation_started_at=run.fix_validation_started_at,
+        pull_request_status=run.pull_request_status,
+        pull_request_number=run.pull_request_number,
+        pull_request_title=run.pull_request_title,
+        pull_request_url=run.pull_request_url,
+        pull_request_branch=run.pull_request_branch,
         reproduction_plan=run.reproduction_plan,
         generated_test=run.generated_test,
         reproduction_status=run.reproduction_status,

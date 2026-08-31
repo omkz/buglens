@@ -7,6 +7,10 @@ import { API_BASE_URL } from "@/lib/config";
 import { AsyncActivity } from "../../_components/async-activity";
 import { EvidenceRecorder } from "../_components/evidence-recorder";
 import { shouldShowAnalyzeBug } from "@/lib/analysis-availability.mjs";
+import {
+  canCreatePullRequest,
+  reconciledCreatedPullRequest,
+} from "@/lib/pull-request-state.mjs";
 import type {
   AgentRunResult,
   AgentRunProgress,
@@ -18,6 +22,8 @@ import type {
   GitHubIssuePublication,
   Investigation,
   InvestigationEvidence,
+  PullRequest,
+  PullRequestPublication,
 } from "../_components/types";
 
 type DetailState =
@@ -114,7 +120,10 @@ export default function InvestigationDetailPage() {
   const [issueError, setIssueError] = useState<string | null>(null);
   const [isValidatingFix, setIsValidatingFix] = useState(false);
   const [fixValidationError, setFixValidationError] = useState<string | null>(null);
+  const [isCreatingPullRequest, setIsCreatingPullRequest] = useState(false);
+  const [pullRequestError, setPullRequestError] = useState<string | null>(null);
   const issueRequestActiveRef = useRef(false);
+  const pullRequestActiveRef = useRef(false);
   const investigationRequestActiveRef = useRef(false);
   const progressSourceRef = useRef<EventSource | null>(null);
   const latestAgentRunAttemptRef = useRef<string | null>(null);
@@ -449,6 +458,12 @@ export default function InvestigationDetailPage() {
                 ? current.agentRun.github_issue_status
                 : null,
               github_issue: currentAttempt ? current.agentRun.github_issue : null,
+              pull_request_status: currentAttempt
+                ? current.agentRun.pull_request_status
+                : null,
+              pull_request: currentAttempt
+                ? current.agentRun.pull_request
+                : null,
               fix_validation: currentAttempt
                 ? current.agentRun.fix_validation
                 : null,
@@ -641,6 +656,85 @@ export default function InvestigationDetailPage() {
       );
     } finally {
       setIsValidatingFix(false);
+    }
+  }
+
+  async function createPullRequest() {
+    if (
+      state.status !== "ready" ||
+      !canCreatePullRequest(state.agentRun, pullRequestActiveRef.current)
+    ) {
+      return;
+    }
+    const expectedAttemptId = state.agentRun.attempt_id;
+    pullRequestActiveRef.current = true;
+    setIsCreatingPullRequest(true);
+    setPullRequestError(null);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/investigations/${encodeURIComponent(investigationId)}/pull-request`,
+        { method: "POST", credentials: "include" },
+      );
+      const body = (await response.json().catch(() => null)) as
+        | PullRequestPublication
+        | { detail?: string }
+        | null;
+      if (!response.ok || !body || !("pull_request" in body)) {
+        throw new Error(
+          body && "detail" in body && body.detail
+            ? body.detail
+            : "Pull request creation failed. Please try again.",
+        );
+      }
+      setState((current) =>
+        current.status === "ready" &&
+        current.agentRun.attempt_id === expectedAttemptId
+          ? {
+              ...current,
+              agentRun: {
+                ...current.agentRun,
+                pull_request_status: "created",
+                pull_request: body.pull_request,
+              },
+            }
+          : current,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Pull request creation failed. Please try again.";
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/investigations/${encodeURIComponent(investigationId)}/agent-run`,
+          { credentials: "include" },
+        );
+        const persisted = (await response.json().catch(() => null)) as
+          | AgentRunStatus
+          | null;
+        const reconciled =
+          response.ok && persisted
+            ? reconciledCreatedPullRequest(persisted, expectedAttemptId)
+            : null;
+        if (response.ok && persisted?.attempt_id === expectedAttemptId) {
+          setState((current) =>
+            current.status === "ready" &&
+            current.agentRun.attempt_id === expectedAttemptId
+              ? { ...current, agentRun: persisted }
+              : current,
+          );
+        }
+        if (reconciled) {
+          setPullRequestError(null);
+          return;
+        }
+      } catch {
+        // A later refresh can restore the persisted publication state.
+      }
+      setPullRequestError(message);
+    } finally {
+      pullRequestActiveRef.current = false;
+      setIsCreatingPullRequest(false);
     }
   }
 
@@ -880,6 +974,11 @@ export default function InvestigationDetailPage() {
                   isValidatingFix={isValidatingFix}
                   fixValidationError={fixValidationError}
                   onValidateFix={validateFix}
+                  pullRequestStatus={state.agentRun.pull_request_status}
+                  pullRequest={state.agentRun.pull_request}
+                  isCreatingPullRequest={isCreatingPullRequest}
+                  pullRequestError={pullRequestError}
+                  onCreatePullRequest={createPullRequest}
                 />
               )}
             </section>
@@ -1051,6 +1150,11 @@ function AgentRunResultView({
   isValidatingFix,
   fixValidationError,
   onValidateFix,
+  pullRequestStatus,
+  pullRequest,
+  isCreatingPullRequest,
+  pullRequestError,
+  onCreatePullRequest,
 }: {
   result: AgentRunResult;
   githubIssueStatus: "creating" | "created" | "failed" | null;
@@ -1062,6 +1166,11 @@ function AgentRunResultView({
   isValidatingFix: boolean;
   fixValidationError: string | null;
   onValidateFix: () => void;
+  pullRequestStatus: AgentRunStatus["pull_request_status"];
+  pullRequest: PullRequest | null;
+  isCreatingPullRequest: boolean;
+  pullRequestError: string | null;
+  onCreatePullRequest: () => void;
 }) {
   const reproductionLabel = result.reproduction_status
     ? {
@@ -1089,6 +1198,11 @@ function AgentRunResultView({
         isValidating={isValidatingFix}
         error={fixValidationError}
         onValidate={onValidateFix}
+        pullRequestStatus={pullRequestStatus}
+        pullRequest={pullRequest}
+        isCreatingPullRequest={isCreatingPullRequest}
+        pullRequestError={pullRequestError}
+        onCreatePullRequest={onCreatePullRequest}
       />
 
       <ResultList title="Possible duplicate issues" empty="No plausible duplicates found.">
@@ -1203,12 +1317,22 @@ function ProposedFix({
   isValidating,
   error,
   onValidate,
+  pullRequestStatus,
+  pullRequest,
+  isCreatingPullRequest,
+  pullRequestError,
+  onCreatePullRequest,
 }: {
   proposal: AgentRunResult["fix_proposal"];
   validation: AgentRunStatus["fix_validation"];
   isValidating: boolean;
   error: string | null;
   onValidate: () => void;
+  pullRequestStatus: AgentRunStatus["pull_request_status"];
+  pullRequest: PullRequest | null;
+  isCreatingPullRequest: boolean;
+  pullRequestError: string | null;
+  onCreatePullRequest: () => void;
 }) {
   if (proposal.status === "not_proposed") {
     return (
@@ -1257,19 +1381,52 @@ function ProposedFix({
         </div>
       ))}
       <div className="space-y-3 border-t border-zinc-800 pt-4">
-        <button
-          type="button"
-          onClick={onValidate}
-          disabled={isValidating || validation?.status === "running"}
-          className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {isValidating || validation?.status === "running" ? (
-            <AsyncActivity label="Validating fix…" />
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={onValidate}
+            disabled={isValidating || validation?.status === "running"}
+            className="rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-200 hover:border-zinc-500 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {isValidating || validation?.status === "running" ? (
+              <AsyncActivity label="Validating fix…" />
+            ) : (
+              "Validate Fix"
+            )}
+          </button>
+          {pullRequestStatus === "created" && pullRequest ? (
+            <a
+              href={pullRequest.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm text-zinc-200 underline decoration-zinc-700 underline-offset-4 hover:decoration-zinc-300"
+            >
+              View pull request #{pullRequest.number}
+            </a>
+          ) : pullRequestStatus === "creating" || isCreatingPullRequest ? (
+            <span className="text-sm text-zinc-300">
+              <AsyncActivity label="Creating PR…" />
+            </span>
           ) : (
-            "Validate Fix"
+            <button
+              type="button"
+              onClick={onCreatePullRequest}
+              disabled={isCreatingPullRequest}
+              className="rounded-full bg-zinc-50 px-4 py-2 text-sm font-medium text-black hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Create PR
+            </button>
           )}
-        </button>
+        </div>
+        {validation?.status !== "validated" && (
+          <p className="text-xs text-amber-500/80">
+            This fix has not been fully validated.
+          </p>
+        )}
         {error && <p className="text-sm text-red-400">{error}</p>}
+        {pullRequestError && (
+          <p className="text-sm text-red-400">{pullRequestError}</p>
+        )}
         {validation && validation.status !== "running" && (
           <div className="space-y-3 rounded-md bg-zinc-900/60 p-4 text-sm">
             <p className="font-medium capitalize text-zinc-200">

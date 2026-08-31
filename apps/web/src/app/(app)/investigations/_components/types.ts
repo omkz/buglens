@@ -106,6 +106,8 @@ export type AgentRunStatus = {
   progress: AgentRunProgress | null;
   github_issue_status: "creating" | "created" | "failed" | null;
   github_issue: GitHubIssue | null;
+  pull_request_status: "creating" | "created" | "failed" | "stale" | null;
+  pull_request: PullRequest | null;
   fix_validation: FixValidationResult | null;
 };
 
@@ -149,4 +151,16 @@ export type GitHubIssue = {
 export type GitHubIssuePublication = {
   status: "created";
   issue: GitHubIssue;
+};
+
+export type PullRequest = {
+  number: number;
+  title: string;
+  url: string;
+  branch: string;
+};
+
+export type PullRequestPublication = {
+  status: "created";
+  pull_request: PullRequest;
 };

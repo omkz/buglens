@@ -587,6 +587,11 @@ def test_agent_run_response_restores_persisted_issue_state():
         github_issue_number=123,
         github_issue_title="Checkout button does not navigate",
         github_issue_url="https://github.com/octo-org/checkout/issues/123",
+        pull_request_status="created",
+        pull_request_number=42,
+        pull_request_title="Fix: Checkout button does not navigate",
+        pull_request_url="https://github.com/octo-org/checkout/pull/42",
+        pull_request_branch="buglensa/fix-123456781234",
     )
     response = _agent_run_response(context.investigation_id, run)
 
@@ -594,6 +599,10 @@ def test_agent_run_response_restores_persisted_issue_state():
     assert response.github_issue is not None
     assert response.github_issue.number == 123
     assert response.github_issue.url.endswith("/issues/123")
+    assert response.pull_request_status == "created"
+    assert response.pull_request is not None
+    assert response.pull_request.number == 42
+    assert response.pull_request.branch == "buglensa/fix-123456781234"
 
 
 def test_publication_requires_connected_session():
