@@ -189,6 +189,137 @@ async def test_failed_bounded_check_reports_validation_failed(monkeypatch, tmp_p
 
 
 @pytest.mark.anyio
+async def test_dependency_install_failure_reports_blocked(monkeypatch, tmp_path):
+    from app.investigation_agent import fix_validation as module
+
+    async def token(**kwargs):
+        return "token"
+
+    async def materialize(value, context, checkout):
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "checkout.ts").write_text("old\n")
+        (checkout / "package.json").write_text("{}\n")
+        (checkout / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+
+    async def unavailable(command, cwd, timeout):
+        assert command == [
+            "pnpm",
+            "install",
+            "--frozen-lockfile",
+            "--ignore-scripts",
+            "--offline",
+        ]
+        return FixValidationCheck(
+            name="pnpm",
+            status="failed",
+            output="Package-manager metadata is unavailable offline.",
+        )
+
+    monkeypatch.setattr(module, "create_scoped_installation_token", token)
+    monkeypatch.setattr(module.shutil, "which", lambda command: f"/usr/bin/{command}")
+    service = FixValidationService(
+        settings=SimpleNamespace(),
+        browser_runner=BrowserRunner(),
+        workspace_parent=tmp_path,
+        materializer=materialize,
+        command_runner=unavailable,
+    )
+
+    result = await service.validate(_context())
+
+    assert result.status == "blocked"
+    assert result.checks[0].name == "Install dependencies without lifecycle scripts"
+    assert result.checks[0].status == "failed"
+
+
+@pytest.mark.anyio
+async def test_successful_install_then_failing_typecheck_reports_validation_failed(
+    monkeypatch, tmp_path
+):
+    from app.investigation_agent import fix_validation as module
+
+    async def token(**kwargs):
+        return "token"
+
+    async def materialize(value, context, checkout):
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "checkout.ts").write_text("old\n")
+        (checkout / "package.json").write_text("{}\n")
+        (checkout / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+        (checkout / "tsconfig.json").write_text("{}\n")
+        bin_dir = checkout / "node_modules" / ".bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "tsc").write_text("")
+
+    async def run_check(command, cwd, timeout):
+        if command[0] == "pnpm":
+            return FixValidationCheck(name="pnpm", status="passed", output="ok")
+        return FixValidationCheck(
+            name="tsc", status="failed", output="TypeScript validation failed."
+        )
+
+    monkeypatch.setattr(module, "create_scoped_installation_token", token)
+    monkeypatch.setattr(module.shutil, "which", lambda command: f"/usr/bin/{command}")
+    service = FixValidationService(
+        settings=SimpleNamespace(),
+        browser_runner=BrowserRunner(),
+        workspace_parent=tmp_path,
+        materializer=materialize,
+        command_runner=run_check,
+    )
+
+    result = await service.validate(_context())
+
+    assert result.status == "validation_failed"
+    assert [check.status for check in result.checks] == ["passed", "failed"]
+    assert result.checks[1].name == "TypeScript typecheck"
+
+
+@pytest.mark.anyio
+async def test_browser_still_reproducing_reports_validation_failed(
+    monkeypatch, tmp_path
+):
+    from app.investigation_agent import fix_validation as module
+
+    async def token(**kwargs):
+        return "token"
+
+    async def materialize(value, context, checkout):
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "checkout.ts").write_text("old\n")
+        (checkout / "tests").mkdir()
+
+    async def passing_check(command, cwd, timeout):
+        return FixValidationCheck(name="Pytest", status="passed", output="ok")
+
+    async def reproduced(checkout, context, checks):
+        checks.append(
+            FixValidationCheck(
+                name="Browser reproduction",
+                status="failed",
+                output="The checkout bug was reproduced.",
+            )
+        )
+        return "reproduced"
+
+    monkeypatch.setattr(module, "create_scoped_installation_token", token)
+    service = FixValidationService(
+        settings=SimpleNamespace(),
+        browser_runner=BrowserRunner(),
+        workspace_parent=tmp_path,
+        materializer=materialize,
+        command_runner=passing_check,
+    )
+    monkeypatch.setattr(service, "_rerun_browser_when_supported", reproduced)
+
+    result = await service.validate(_context())
+
+    assert result.status == "validation_failed"
+    assert result.reproduction_after == "reproduced"
+    assert result.checks[-1].status == "failed"
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("claim_state", "status_code"),
     [

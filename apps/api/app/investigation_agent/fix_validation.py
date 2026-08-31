@@ -24,6 +24,7 @@ from .tools.playwright import PlaywrightPlanRunner
 _MAX_OUTPUT = 20_000
 _COMMAND_TIMEOUT = 120
 _APP_START_TIMEOUT = 30
+_DEPENDENCY_INSTALL_CHECK = "Install dependencies without lifecycle scripts"
 
 
 class FixValidationCheck(BaseModel):
@@ -108,6 +109,21 @@ class FixValidationService:
                 return _result(status, apply_result.output, checks, context)
 
             checks.extend(await self._run_known_checks(checkout))
+            dependency_install = next(
+                (
+                    check
+                    for check in checks
+                    if check.name == _DEPENDENCY_INSTALL_CHECK
+                ),
+                None,
+            )
+            if dependency_install is not None and dependency_install.status != "passed":
+                return _result(
+                    "blocked",
+                    "Dependencies could not be prepared in the isolated validation environment.",
+                    checks,
+                    context,
+                )
             if any(check.status in {"failed", "timed_out"} for check in checks):
                 return _result(
                     "validation_failed", "One or more bounded validation checks failed.", checks, context
@@ -158,7 +174,7 @@ class FixValidationService:
                 manager = ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--offline"]
             if manager is not None:
                 install = await self.command_runner(manager, checkout, _COMMAND_TIMEOUT)
-                install.name = "Install dependencies without lifecycle scripts"
+                install.name = _DEPENDENCY_INSTALL_CHECK
                 checks.append(install)
                 if install.status != "passed":
                     return checks
