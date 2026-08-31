@@ -11,6 +11,7 @@ LongText = Annotated[str, Field(min_length=1, max_length=5_000)]
 Selector = Annotated[str, Field(min_length=1, max_length=500)]
 Value = Annotated[str, Field(max_length=2_000)]
 FixContent = Annotated[str, Field(max_length=50_000)]
+FixDraftContent = Annotated[str, Field(max_length=100_000)]
 
 
 def _relative_path(value: str) -> str:
@@ -66,6 +67,24 @@ class FixProposal(StrictSchema):
 
     @model_validator(mode="after")
     def require_unique_paths(self) -> "FixProposal":
+        paths = [change.path for change in self.files]
+        if len(paths) != len(set(paths)):
+            raise ValueError("A fix proposal cannot change a file more than once.")
+        return self
+
+
+class ProposedFileChangeDraft(StrictSchema):
+    path: Annotated[str, Field(min_length=1, max_length=1_000)]
+    updated_content: FixDraftContent
+    explanation: LongText
+
+
+class FixProposalDraft(StrictSchema):
+    summary: LongText
+    files: list[ProposedFileChangeDraft] = Field(min_length=1, max_length=5)
+
+    @model_validator(mode="after")
+    def require_unique_paths(self) -> "FixProposalDraft":
         paths = [change.path for change in self.files]
         if len(paths) != len(set(paths)):
             raise ValueError("A fix proposal cannot change a file more than once.")
@@ -142,18 +161,44 @@ class BrowserTestPlan(StrictSchema):
     _validate_start_path = field_validator("start_path")(_relative_path)
 
 
-class AgentInvestigationResult(StrictSchema):
+class _AgentInvestigationResultBase(StrictSchema):
     repository_findings: list[RepositoryFinding] = Field(max_length=30)
     duplicate_candidates: list[DuplicateCandidate] = Field(max_length=10)
     reproduction_plan: BrowserTestPlan | None = None
     cannot_reproduce_reason: Annotated[str, Field(max_length=5_000)] | None = None
+
+    @model_validator(mode="after")
+    def require_plan_or_reason(self) -> "_AgentInvestigationResultBase":
+        if self.reproduction_plan is None and not self.cannot_reproduce_reason:
+            raise ValueError("A missing browser plan requires a reason.")
+        return self
+
+
+class AgentInvestigationDraftResult(_AgentInvestigationResultBase):
+    fix_proposal: FixProposalDraft | None = None
+    cannot_propose_fix_reason: Annotated[str, Field(max_length=2_000)] | None = None
+
+    @model_validator(mode="after")
+    def require_fix_or_reason(self) -> "AgentInvestigationDraftResult":
+        if self.fix_proposal is None and (
+            not self.cannot_propose_fix_reason
+            or not self.cannot_propose_fix_reason.strip()
+        ):
+            raise ValueError("A missing fix proposal requires a reason.")
+        if (
+            self.fix_proposal is not None
+            and self.cannot_propose_fix_reason is not None
+        ):
+            raise ValueError("A fix proposal cannot also include a no-fix reason.")
+        return self
+
+
+class AgentInvestigationResult(_AgentInvestigationResultBase):
     fix_proposal: FixProposal | None = None
     cannot_propose_fix_reason: Annotated[str, Field(max_length=2_000)] | None = None
 
     @model_validator(mode="after")
-    def require_plan_or_reason(self) -> "AgentInvestigationResult":
-        if self.reproduction_plan is None and not self.cannot_reproduce_reason:
-            raise ValueError("A missing browser plan requires a reason.")
+    def require_fix_or_reason(self) -> "AgentInvestigationResult":
         if self.fix_proposal is None and (
             not self.cannot_propose_fix_reason
             or not self.cannot_propose_fix_reason.strip()

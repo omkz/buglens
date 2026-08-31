@@ -14,7 +14,13 @@ from app.integrations.github.access import create_scoped_installation_token
 from .agent import AgentConfigurationError, RepositoryInvestigationAgent
 from .fixes import MAX_FIX_CONTENT_BYTES, is_forbidden_fix_path
 from .repository import AgentRunContext
-from .schemas import AgentInvestigationResult, BrowserExecutionResult
+from .schemas import (
+    AgentInvestigationDraftResult,
+    AgentInvestigationResult,
+    BrowserExecutionResult,
+    FixProposal,
+    ProposedFileChange,
+)
 from .tools.github import GitHubToolContext
 from .tools.playwright import (
     PlaywrightPlanRunner,
@@ -139,7 +145,7 @@ class InvestigationAgentService:
 
 
 def _validate_agent_result(
-    result: AgentInvestigationResult, github_tools: GitHubToolContext
+    result: AgentInvestigationDraftResult, github_tools: GitHubToolContext
 ) -> AgentInvestigationResult:
     for finding in result.repository_findings:
         if finding.path not in github_tools.read_paths:
@@ -156,32 +162,64 @@ def _validate_agent_result(
             raise InvestigationResultError(
                 "Agent cited an issue that was not returned by the scoped search."
             )
+    fix_proposal = _normalize_fix_proposal(result, github_tools)
+    fix_reason = result.cannot_propose_fix_reason
+    if result.fix_proposal is not None and fix_proposal is None:
+        fix_reason = _UNVERIFIED_FIX_PROPOSAL_REASON
+    return AgentInvestigationResult(
+        repository_findings=result.repository_findings,
+        duplicate_candidates=result.duplicate_candidates,
+        reproduction_plan=result.reproduction_plan,
+        cannot_reproduce_reason=result.cannot_reproduce_reason,
+        fix_proposal=fix_proposal,
+        cannot_propose_fix_reason=fix_reason,
+    )
+
+
+def _normalize_fix_proposal(
+    result: AgentInvestigationDraftResult,
+    github_tools: GitHubToolContext,
+) -> FixProposal | None:
     if result.fix_proposal is None:
-        return result
+        return None
+    normalized_changes: list[ProposedFileChange] = []
     for change in result.fix_proposal.files:
         if is_forbidden_fix_path(change.path):
-            return _without_unverified_fix_proposal(result)
+            return None
         if change.path not in github_tools.known_paths:
-            return _without_unverified_fix_proposal(result)
+            return None
+        if change.path not in github_tools.read_paths:
+            return None
         original = github_tools.read_files.get(change.path)
         if original is None:
-            return _without_unverified_fix_proposal(result)
-        if change.original_content != original:
-            return _without_unverified_fix_proposal(result)
+            return None
+        try:
+            original_size = len(original.encode("utf-8"))
+            updated_size = len(change.updated_content.encode("utf-8"))
+        except UnicodeError:
+            return None
         if (
-            len(change.original_content.encode("utf-8")) > MAX_FIX_CONTENT_BYTES
-            or len(change.updated_content.encode("utf-8")) > MAX_FIX_CONTENT_BYTES
+            original_size > MAX_FIX_CONTENT_BYTES
+            or updated_size > MAX_FIX_CONTENT_BYTES
         ):
-            return _without_unverified_fix_proposal(result)
-    return result
-
-
-def _without_unverified_fix_proposal(
-    result: AgentInvestigationResult,
-) -> AgentInvestigationResult:
-    return result.model_copy(
-        update={
-            "fix_proposal": None,
-            "cannot_propose_fix_reason": _UNVERIFIED_FIX_PROPOSAL_REASON,
-        }
-    )
+            return None
+        if change.updated_content == original:
+            return None
+        try:
+            normalized_changes.append(
+                ProposedFileChange(
+                    path=change.path,
+                    original_content=original,
+                    updated_content=change.updated_content,
+                    explanation=change.explanation,
+                )
+            )
+        except ValueError:
+            return None
+    try:
+        return FixProposal(
+            summary=result.fix_proposal.summary,
+            files=normalized_changes,
+        )
+    except ValueError:
+        return None

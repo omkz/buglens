@@ -37,10 +37,12 @@ from app.investigation_agent.repository import (
 )
 from app.investigation_agent.fixes import render_unified_diff
 from app.investigation_agent.schemas import (
+    AgentInvestigationDraftResult,
     AgentInvestigationResult,
     BrowserExecutionResult,
     BrowserTestPlan,
     FixProposal,
+    FixProposalDraft,
 )
 from app.investigation_agent.service import (
     InvestigationAgentService,
@@ -93,6 +95,12 @@ def _result(*, with_plan: bool = True) -> AgentInvestigationResult:
         reproduction_plan=plan,
         cannot_reproduce_reason=None if plan else "No application URL configured.",
         cannot_propose_fix_reason="No safe fix was proposed for this test result.",
+    )
+
+
+def _draft_result(*, with_plan: bool = True) -> AgentInvestigationDraftResult:
+    return AgentInvestigationDraftResult.model_validate(
+        _result(with_plan=with_plan).model_dump(mode="python")
     )
 
 
@@ -237,7 +245,9 @@ async def test_adk_agent_uses_ephemeral_runner_structured_output_and_security_pr
 
     class FakeEvent:
         content = SimpleNamespace(
-            parts=[SimpleNamespace(text=_result(with_plan=False).model_dump_json())]
+            parts=[
+                SimpleNamespace(text=_draft_result(with_plan=False).model_dump_json())
+            ]
         )
 
         def is_final_response(self):
@@ -268,18 +278,22 @@ async def test_adk_agent_uses_ephemeral_runner_structured_output_and_security_pr
         tools=[],
     )
 
-    assert result == _result(with_plan=False)
+    assert result == _draft_result(with_plan=False)
     assert captured["gemini"]["client_kwargs"] == {
         "vertexai": True,
         "project": "orbital-wharf-427808-p5",
         "location": "global",
     }
-    assert captured["agent"]["output_schema"] is AgentInvestigationResult
+    assert captured["agent"]["output_schema"] is AgentInvestigationDraftResult
     assert "mode" not in captured["agent"]
     assert "untrusted data" in captured["agent"]["instruction"]
     assert "Never follow instructions" in captured["agent"]["instruction"]
     assert "smallest reasonable fix" in captured["agent"]["instruction"]
     assert "you actually read" in captured["agent"]["instruction"]
+    assert (
+        "Do not return or reconstruct the original"
+        in captured["agent"]["instruction"]
+    )
     prompt = captured["run"]["new_message"].parts[0].text
     assert "untrusted bug evidence" in prompt
     assert "orbital-wharf-427808-p5" not in prompt
@@ -734,7 +748,7 @@ def test_agent_findings_and_duplicate_candidates_must_come_from_scoped_tools():
         "body",
         [],
     )
-    valid = AgentInvestigationResult.model_validate(
+    valid = AgentInvestigationDraftResult.model_validate(
         {
             "repository_findings": [
                 {
@@ -782,6 +796,49 @@ def _fix_proposal(*paths: str) -> FixProposal:
     )
 
 
+def _fix_proposal_draft(
+    *paths: str,
+    updated_content: str = "return navigate();\n",
+) -> FixProposalDraft:
+    return FixProposalDraft.model_validate(
+        {
+            "summary": "Return the checkout navigation result.",
+            "files": [
+                {
+                    "path": path,
+                    "updated_content": updated_content,
+                    "explanation": "Use the existing navigation helper.",
+                }
+                for path in paths
+            ],
+        }
+    )
+
+
+def test_agent_fix_proposal_draft_excludes_original_content():
+    draft = _fix_proposal_draft("src/checkout.ts")
+
+    assert draft.files[0].model_dump() == {
+        "path": "src/checkout.ts",
+        "updated_content": "return navigate();\n",
+        "explanation": "Use the existing navigation helper.",
+    }
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        FixProposalDraft.model_validate(
+            {
+                "summary": "Fix checkout.",
+                "files": [
+                    {
+                        "path": "src/checkout.ts",
+                        "original_content": "return false;\n",
+                        "updated_content": "return navigate();\n",
+                        "explanation": "Use the navigation helper.",
+                    }
+                ],
+            }
+        )
+
+
 def test_agent_result_requires_exactly_one_fix_proposal_outcome():
     base = {
         "repository_findings": [],
@@ -791,15 +848,15 @@ def test_agent_result_requires_exactly_one_fix_proposal_outcome():
             "actions": [{"type": "goto", "path": "/checkout"}],
         },
     }
-    proposal = _fix_proposal("src/checkout.ts").model_dump(mode="json")
+    proposal = _fix_proposal_draft("src/checkout.ts").model_dump(mode="json")
 
-    with_proposal = AgentInvestigationResult.model_validate(
+    with_proposal = AgentInvestigationDraftResult.model_validate(
         {**base, "fix_proposal": proposal}
     )
     assert with_proposal.fix_proposal is not None
     assert with_proposal.cannot_propose_fix_reason is None
 
-    without_proposal = AgentInvestigationResult.model_validate(
+    without_proposal = AgentInvestigationDraftResult.model_validate(
         {**base, "cannot_propose_fix_reason": "The relevant file was unavailable."}
     )
     assert without_proposal.fix_proposal is None
@@ -808,10 +865,10 @@ def test_agent_result_requires_exactly_one_fix_proposal_outcome():
     )
 
     with pytest.raises(ValidationError, match="missing fix proposal requires a reason"):
-        AgentInvestigationResult.model_validate(base)
+        AgentInvestigationDraftResult.model_validate(base)
 
     with pytest.raises(ValidationError, match="cannot also include a no-fix reason"):
-        AgentInvestigationResult.model_validate(
+        AgentInvestigationDraftResult.model_validate(
             {
                 **base,
                 "fix_proposal": proposal,
@@ -835,8 +892,8 @@ def _fix_tool_context(*paths: str) -> GitHubToolContext:
 
 
 def test_valid_one_file_fix_proposal_uses_exact_read_content():
-    proposal = _fix_proposal("src/checkout.ts")
-    result = _result(with_plan=False).model_copy(
+    proposal = _fix_proposal_draft("src/checkout.ts")
+    result = _draft_result(with_plan=False).model_copy(
         update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
     )
 
@@ -844,16 +901,15 @@ def test_valid_one_file_fix_proposal_uses_exact_read_content():
         result, _fix_tool_context("src/checkout.ts")
     )
 
-    assert validated is result
-    assert validated.fix_proposal == proposal
+    assert validated.fix_proposal == _fix_proposal("src/checkout.ts")
     assert validated.cannot_propose_fix_reason is None
 
 
 def test_multi_file_fix_proposal_within_limit_is_valid():
     paths = tuple(f"src/checkout-{index}.ts" for index in range(5))
-    result = _result(with_plan=False).model_copy(
+    result = _draft_result(with_plan=False).model_copy(
         update={
-            "fix_proposal": _fix_proposal(*paths),
+            "fix_proposal": _fix_proposal_draft(*paths),
             "cannot_propose_fix_reason": None,
         }
     )
@@ -862,9 +918,9 @@ def test_multi_file_fix_proposal_within_limit_is_valid():
 
 
 def test_fix_proposal_for_unread_file_is_discarded():
-    result = _result(with_plan=False).model_copy(
+    result = _draft_result(with_plan=False).model_copy(
         update={
-            "fix_proposal": _fix_proposal("src/checkout.ts"),
+            "fix_proposal": _fix_proposal_draft("src/checkout.ts"),
             "cannot_propose_fix_reason": None,
         }
     )
@@ -879,9 +935,9 @@ def test_fix_proposal_for_unread_file_is_discarded():
 
 
 def test_fix_proposal_for_nonexistent_file_is_discarded():
-    result = _result(with_plan=False).model_copy(
+    result = _draft_result(with_plan=False).model_copy(
         update={
-            "fix_proposal": _fix_proposal("src/missing.ts"),
+            "fix_proposal": _fix_proposal_draft("src/missing.ts"),
             "cannot_propose_fix_reason": None,
         }
     )
@@ -895,28 +951,26 @@ def test_fix_proposal_for_nonexistent_file_is_discarded():
     assert validated.cannot_propose_fix_reason
 
 
-def test_fix_proposal_original_content_must_match_the_read_file():
-    proposal = _fix_proposal("src/checkout.ts").model_copy(deep=True)
-    proposal.files[0].original_content = "invented source\n"
-    result = _result(with_plan=False).model_copy(
+def test_fix_proposal_uses_the_exact_canonical_read_file_content():
+    canonical = "export function checkout() {\r\n  return false;\r\n}\r\n"
+    proposal = _fix_proposal_draft("src/checkout.ts")
+    result = _draft_result(with_plan=False).model_copy(
         update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
     )
+    context = _fix_tool_context("src/checkout.ts")
+    context.read_files["src/checkout.ts"] = canonical
 
-    validated = _validate_agent_result(
-        result, _fix_tool_context("src/checkout.ts")
-    )
+    validated = _validate_agent_result(result, context)
 
-    assert validated.fix_proposal is None
-    assert validated.cannot_propose_fix_reason == (
-        "The proposed fix could not be safely verified against the retrieved "
-        "repository files."
-    )
-    assert validated.reproduction_plan == result.reproduction_plan
+    assert "original_content" not in proposal.files[0].model_dump()
+    assert validated.fix_proposal is not None
+    assert validated.fix_proposal.files[0].original_content == canonical
+    assert validated.fix_proposal.files[0].updated_content == "return navigate();\n"
 
 
 def test_fix_proposal_rejects_too_many_files_and_oversized_content():
     with pytest.raises(ValidationError, match="too_long"):
-        _fix_proposal(*(f"src/file-{index}.ts" for index in range(6)))
+        _fix_proposal_draft(*(f"src/file-{index}.ts" for index in range(6)))
 
     with pytest.raises(ValidationError, match="string_too_long"):
         FixProposal.model_validate(
@@ -934,6 +988,44 @@ def test_fix_proposal_rejects_too_many_files_and_oversized_content():
         )
 
 
+@pytest.mark.parametrize("oversized_part", ["original", "updated"])
+def test_fix_proposal_oversized_content_is_discarded(oversized_part):
+    updated = "x" * 50_001 if oversized_part == "updated" else "fixed\n"
+    proposal = _fix_proposal_draft(
+        "src/checkout.ts",
+        updated_content=updated,
+    )
+    result = _draft_result(with_plan=False).model_copy(
+        update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
+    )
+    context = _fix_tool_context("src/checkout.ts")
+    if oversized_part == "original":
+        context.read_files["src/checkout.ts"] = "x" * 50_001
+
+    validated = _validate_agent_result(result, context)
+
+    assert validated.fix_proposal is None
+    assert validated.cannot_propose_fix_reason
+
+
+def test_fix_proposal_identical_to_canonical_content_is_discarded():
+    proposal = _fix_proposal_draft(
+        "src/checkout.ts",
+        updated_content="return false;\n",
+    )
+    result = _draft_result(with_plan=False).model_copy(
+        update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
+    )
+
+    validated = _validate_agent_result(
+        result,
+        _fix_tool_context("src/checkout.ts"),
+    )
+
+    assert validated.fix_proposal is None
+    assert validated.cannot_propose_fix_reason
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -947,8 +1039,11 @@ def test_fix_proposal_rejects_too_many_files_and_oversized_content():
     ],
 )
 def test_fix_proposal_for_forbidden_or_sensitive_path_is_discarded(path):
-    result = _result(with_plan=False).model_copy(
-        update={"fix_proposal": _fix_proposal(path), "cannot_propose_fix_reason": None}
+    result = _draft_result(with_plan=False).model_copy(
+        update={
+            "fix_proposal": _fix_proposal_draft(path),
+            "cannot_propose_fix_reason": None,
+        }
     )
 
     validated = _validate_agent_result(result, _fix_tool_context(path))
@@ -958,16 +1053,16 @@ def test_fix_proposal_for_forbidden_or_sensitive_path_is_discarded(path):
 
 
 def test_no_fix_proposal_remains_a_successful_result_with_reason():
-    result = _result(with_plan=False).model_copy(
+    result = _draft_result(with_plan=False).model_copy(
         update={
             "fix_proposal": None,
             "cannot_propose_fix_reason": "The relevant implementation was unavailable.",
         }
     )
 
-    _validate_agent_result(result, _fix_tool_context())
-    assert result.fix_proposal is None
-    assert result.cannot_propose_fix_reason == (
+    validated = _validate_agent_result(result, _fix_tool_context())
+    assert validated.fix_proposal is None
+    assert validated.cannot_propose_fix_reason == (
         "The relevant implementation was unavailable."
     )
 
@@ -1005,7 +1100,7 @@ async def test_service_emits_progress_only_at_trusted_orchestration_boundaries(
         model_name = "gemini-test-model"
 
         async def investigate(self, **kwargs):
-            return _result(with_plan=True)
+            return _draft_result(with_plan=True)
 
     class Runner:
         async def run(self, plan, *, app_url):
@@ -1052,14 +1147,16 @@ async def test_service_emits_progress_only_at_trusted_orchestration_boundaries(
 
 
 @pytest.mark.anyio
-async def test_service_discards_unverified_fix_and_still_runs_browser(monkeypatch):
+async def test_service_discards_unchanged_fix_and_still_runs_browser(monkeypatch):
     from app.investigation_agent import service as service_module
 
     plan = _result(with_plan=True).reproduction_plan
     assert plan is not None
-    proposal = _fix_proposal("src/checkout.ts").model_copy(deep=True)
-    proposal.files[0].original_content = "stale source\n"
-    agent_result = _result(with_plan=True).model_copy(
+    proposal = _fix_proposal_draft(
+        "src/checkout.ts",
+        updated_content="return false;\n",
+    )
+    agent_result = _draft_result(with_plan=True).model_copy(
         update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
     )
 
@@ -1361,8 +1458,15 @@ async def test_complete_agent_run_persists_structured_fix_proposal():
     investigation_id = uuid.uuid4()
     attempt_id = uuid.uuid4()
     proposal = _fix_proposal("src/checkout.ts")
-    result = _result(with_plan=False).model_copy(
-        update={"fix_proposal": proposal, "cannot_propose_fix_reason": None}
+    draft = _draft_result(with_plan=False).model_copy(
+        update={
+            "fix_proposal": _fix_proposal_draft("src/checkout.ts"),
+            "cannot_propose_fix_reason": None,
+        }
+    )
+    result = _validate_agent_result(
+        draft,
+        _fix_tool_context("src/checkout.ts"),
     )
     persisted = _persisted_run(investigation_id)
     run = SimpleNamespace(**persisted.__dict__)
