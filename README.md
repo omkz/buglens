@@ -222,3 +222,9 @@ production.
 PR #4 demonstrates Buglensa applying the persisted fix on an isolated
 `buglensa/fix-*` branch and opening a reviewable PR without modifying `main`
 directly.
+
+## License
+
+Copyright 2026 Kurnia Muhamad.
+
+Licensed under the Apache License, Version 2.0.
