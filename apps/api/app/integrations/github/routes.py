@@ -115,6 +115,12 @@ async def get_status(
     }
 
 
+@router.post("/logout")
+def logout(request: Request) -> dict[str, bool]:
+    request.session.clear()
+    return {"success": True}
+
+
 @router.get("/repositories")
 async def get_repositories(
     request: Request,

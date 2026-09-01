@@ -28,6 +28,7 @@ from app.db import models
 from app.db.session import SessionLocal, engine
 from app.integrations.github import client as github_client
 from app.integrations.github.repository import (
+    PersistedGitHubConnection,
     get_connection_by_id,
     persist_github_connection,
 )
@@ -202,6 +203,56 @@ def test_status_database_failure_returns_safe_service_unavailable(monkeypatch):
     test_logger.exception.assert_called_once_with("github_status_db_failed")
 
 
+def test_logout_disconnects_authenticated_session(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.integrations.github import routes
+    from app.main import app
+
+    connection_id = uuid.uuid4()
+
+    async def connected_lookup(*args, **kwargs):
+        return PersistedGitHubConnection(
+            connection_id=connection_id,
+            user_id=uuid.uuid4(),
+            installation_id=uuid.uuid4(),
+            github_installation_id=900_100_031,
+            account_login="octo-org",
+        )
+
+    monkeypatch.setattr(routes, "get_connection_by_id", connected_lookup)
+
+    client = TestClient(app)
+    client.cookies.set(
+        "buglens_session",
+        _signed_session_cookie({"github_connection_id": str(connection_id)}),
+    )
+    assert client.get("/api/github/status").json()["connected"] is True
+
+    response = client.post("/api/github/logout")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True}
+    assert client.get("/api/github/status").json()["connected"] is False
+
+
+def test_logout_is_idempotent_when_disconnected():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+
+    first = client.post("/api/github/logout")
+    second = client.post("/api/github/logout")
+
+    assert first.status_code == 200
+    assert first.json() == {"success": True}
+    assert second.status_code == 200
+    assert second.json() == {"success": True}
+    assert client.get("/api/github/status").json()["connected"] is False
+
+
 # --- schema-level checks (no database required) ------------------------
 
 
@@ -320,6 +371,57 @@ def test_persist_github_connection_is_idempotent_on_reconnect():
             await _cleanup(test_github_user_id, test_github_installation_id)
 
     asyncio.run(_run())
+
+
+@requires_database
+def test_logout_does_not_delete_persisted_github_connection_data():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    test_github_user_id = 900_100_041
+    test_github_installation_id = 900_100_042
+
+    async def _persist():
+        async with SessionLocal() as db:
+            connection = await persist_github_connection(
+                db,
+                github_user_id=test_github_user_id,
+                github_login="octocat",
+                github_installation_id=test_github_installation_id,
+                account_login="octo-org",
+            )
+            await db.commit()
+            return connection
+
+    async def _assert_records_remain(connection):
+        async with SessionLocal() as db:
+            assert await db.get(models.User, connection.user_id) is not None
+            assert (
+                await db.get(models.GitHubInstallation, connection.installation_id)
+                is not None
+            )
+            assert (
+                await db.get(models.GitHubConnection, connection.connection_id)
+                is not None
+            )
+
+    try:
+        connection = asyncio.run(_persist())
+        client = TestClient(app)
+        client.cookies.set(
+            "buglens_session",
+            _signed_session_cookie(
+                {"github_connection_id": str(connection.connection_id)}
+            ),
+        )
+
+        response = client.post("/api/github/logout")
+
+        assert response.status_code == 200
+        asyncio.run(_assert_records_remain(connection))
+    finally:
+        asyncio.run(_cleanup(test_github_user_id, test_github_installation_id))
 
 
 @requires_database

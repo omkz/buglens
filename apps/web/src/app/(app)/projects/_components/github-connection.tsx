@@ -12,6 +12,7 @@ export type GithubConnectionInfo = {
 
 export function GithubConnection({ info }: { info: GithubConnectionInfo }) {
   const [isRedirecting, setIsRedirecting] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleConnect = useCallback(async () => {
@@ -39,6 +40,26 @@ export function GithubConnection({ info }: { info: GithubConnectionInfo }) {
     }
   }, []);
 
+  const handleSignOut = useCallback(async () => {
+    setError(null);
+    setIsSigningOut(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/github/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error("Failed to sign out. Please try again.");
+      }
+      window.location.replace("/");
+    } catch (err) {
+      setIsSigningOut(false);
+      setError(
+        err instanceof Error ? err.message : "Failed to sign out. Please try again.",
+      );
+    }
+  }, []);
+
   if (info.status === "loading") {
     return (
       <div className="rounded-lg border border-zinc-800 px-5 py-4 text-sm text-zinc-500">
@@ -49,12 +70,25 @@ export function GithubConnection({ info }: { info: GithubConnectionInfo }) {
 
   if (info.status === "connected") {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-zinc-800 px-5 py-4 text-sm text-emerald-400">
-        <span aria-hidden>●</span>
-        GitHub connected
-        {info.accountLogin && (
-          <span className="text-zinc-500">as @{info.accountLogin}</span>
-        )}
+      <div className="rounded-lg border border-zinc-800 px-5 py-4 text-sm">
+        <div className="flex items-center gap-2">
+          <span className="text-emerald-400" aria-hidden>
+            ●
+          </span>
+          <span className="text-emerald-400">GitHub connected</span>
+          {info.accountLogin && (
+            <span className="text-zinc-500">as @{info.accountLogin}</span>
+          )}
+          <button
+            type="button"
+            onClick={handleSignOut}
+            disabled={isSigningOut}
+            className="ml-auto text-zinc-500 transition-colors hover:text-zinc-200 disabled:opacity-60"
+          >
+            {isSigningOut ? "Signing out…" : "Sign out"}
+          </button>
+        </div>
+        {error && <p className="mt-3 text-red-400">{error}</p>}
       </div>
     );
   }
